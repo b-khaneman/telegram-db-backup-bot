@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>پنل بکاپ دیتابیس</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700&family=Outfit:wght@500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="bg-layer" aria-hidden="true"></div>
+  <div class="orb orb-a" aria-hidden="true"></div>
+  <div class="orb orb-b" aria-hidden="true"></div>
+
+  <main class="shell">
+    <header class="brand-bar glass">
+      <div class="brand">
+        <span class="mark">DB</span>
+        <div>
+          <h1>Backup Glass</h1>
+          <p>پنل مدیریت حرفه‌ای · {{ timezone }} · {{ bot_mode }}</p>
+        </div>
+      </div>
+      <form method="post" action="/logout">
+        <button type="submit" class="btn ghost">خروج</button>
+      </form>
+    </header>
+
+    {% if flash %}
+    <div class="flash glass">{{ flash }}</div>
+    {% endif %}
+
+    <section class="grid stats-grid">
+      <article class="glass card compact">
+        <h3>آخرین بکاپ</h3>
+        <p class="big">{% if last_backup.ok == True %}✅ موفق{% elif last_backup.ok == False %}❌ ناموفق{% else %}—{% endif %}</p>
+        <p class="muted">{{ last_backup.db_name or '—' }} · {{ last_backup_size }}</p>
+        <p class="muted">{{ last_backup_at }}</p>
+      </article>
+      <article class="glass card compact">
+        <h3>اجرای بعدی</h3>
+        <p class="big countdown">{{ countdown }}</p>
+        <p class="muted">{{ next_run }}</p>
+        <p class="muted">{{ schedule.next_hint or 'زمان‌بندی خاموش' }}</p>
+      </article>
+      <article class="glass card compact">
+        <h3>دیتابیس‌ها</h3>
+        <p class="big">{{ enabled_count }} / {{ dbs|length }}</p>
+        <p class="muted">فعال / کل</p>
+      </article>
+      <article class="glass card compact">
+        <h3>حالت ربات</h3>
+        <p class="big">{{ bot_mode }}</p>
+        <p class="muted mono small">{{ webhook_url }}</p>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="glass card">
+        <h2>عملیات سریع</h2>
+        <p class="muted">بکاپ فوری و ارسال به تلگرام</p>
+        <form method="post" action="/backup/now" class="row">
+          <button type="submit" class="btn primary">⚡ بکاپ فوری همه</button>
+        </form>
+      </article>
+
+      <article class="glass card">
+        <h2>زمان‌بندی پیوسته</h2>
+        <p class="muted">روزانه یا هر N دقیقه (لحظه به لحظه عملی)</p>
+        <form method="post" action="/schedule" class="form">
+          <label class="switch">
+            <input type="checkbox" name="enabled" value="1" {% if schedule.enabled %}checked{% endif %} />
+            <span>فعال‌سازی بکاپ خودکار</span>
+          </label>
+          <div class="row">
+            <label>حالت
+              <select name="mode">
+                <option value="minutes" {% if schedule.mode in ('minutes', 'interval_minutes') %}selected{% endif %}>هر N دقیقه</option>
+                <option value="daily" {% if schedule.mode == 'daily' %}selected{% endif %}>روزانه</option>
+                <option value="interval" {% if schedule.mode == 'interval' %}selected{% endif %}>هر N ساعت</option>
+              </select>
+            </label>
+            <label>دقیقه (پیوسته)
+              <input type="number" name="interval_minutes" min="1" max="60" value="{{ schedule.interval_minutes }}" />
+            </label>
+            <label>ساعت روزانه
+              <input type="number" name="hour" min="0" max="23" value="{{ schedule.hour }}" />
+            </label>
+            <label>دقیقه روزانه
+              <input type="number" name="minute" min="0" max="59" value="{{ schedule.minute }}" />
+            </label>
+            <label>بازه ساعتی
+              <input type="number" name="interval_hours" min="1" max="168" value="{{ schedule.interval_hours }}" />
+            </label>
+          </div>
+          <button type="submit" class="btn primary">ذخیره زمان‌بندی</button>
+        </form>
+      </article>
+    </section>
+
+    <section class="glass card wide">
+      <div class="card-head">
+        <div>
+          <h2>دیتابیس‌ها</h2>
+          <p class="muted">مدیریت چند اتصال · تست · بکاپ تکی</p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>نام</th>
+              <th>موتور</th>
+              <th>هدف</th>
+              <th>وضعیت</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for db in dbs %}
+            <tr>
+              <td>{{ db.name }}</td>
+              <td><span class="tag">{{ db.engine.value }}</span></td>
+              <td class="mono">{{ db.display_target() }}</td>
+              <td>{% if db.enabled %}فعال{% else %}خاموش{% endif %}</td>
+              <td class="actions">
+                <form method="post" action="/backup/{{ db.id }}"><button class="btn tiny">بکاپ</button></form>
+                <form method="post" action="/db/{{ db.id }}/test"><button class="btn tiny ghost">تست</button></form>
+                <form method="post" action="/db/{{ db.id }}/toggle"><button class="btn tiny ghost">تغییر</button></form>
+                <form method="post" action="/db/{{ db.id }}/delete" onsubmit="return confirm('حذف شود؟')"><button class="btn tiny danger">حذف</button></form>
+              </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="empty">هنوز دیتابیسی ثبت نشده</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="glass card wide">
+      <h2>افزودن دیتابیس</h2>
+      <form method="post" action="/db/add" class="form">
+        <div class="row">
+          <label>نام نمایشی<input name="name" required placeholder="فروشگاه" /></label>
+          <label>موتور
+            <select name="engine" id="engine">
+              <option value="mysql">MySQL</option>
+              <option value="mariadb">MariaDB</option>
+              <option value="postgresql">PostgreSQL</option>
+              <option value="sqlite">SQLite</option>
+            </select>
+          </label>
+        </div>
+        <div class="row net-fields">
+          <label>هاست<input name="host" value="127.0.0.1" /></label>
+          <label>پورت<input name="port" type="number" value="3306" /></label>
+          <label>کاربر<input name="user" value="root" /></label>
+          <label>رمز<input name="password" type="password" /></label>
+          <label>دیتابیس<input name="database" /></label>
+        </div>
+        <div class="row sqlite-fields" hidden>
+          <label>مسیر فایل SQLite<input name="file_path" placeholder="/var/www/app.db" /></label>
+        </div>
+        <button type="submit" class="btn primary">ثبت اتصال</button>
+      </form>
+    </section>
+
+    <section class="grid">
+      <article class="glass card">
+        <h2>تاریخچه بکاپ‌ها</h2>
+        <p class="muted">دانلود از سرور</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>فایل</th><th>حجم</th><th>زمان</th><th></th></tr></thead>
+            <tbody>
+              {% for h in history %}
+              <tr>
+                <td class="mono small">{{ h.name }}</td>
+                <td>{{ h.size_h }}</td>
+                <td class="muted">{{ h.mtime_h }}</td>
+                <td><a class="btn tiny" href="/download/{{ h.name }}">دانلود</a></td>
+              </tr>
+              {% else %}
+              <tr><td colspan="4" class="empty">فایلی نیست</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="glass card">
+        <h2>فعالیت اخیر</h2>
+        <ul class="activity">
+          {% for a in activity %}
+          <li><span class="muted">{{ a.t_h }}</span> {{ a.msg }}</li>
+          {% else %}
+          <li class="muted">هنوز رویدادی ثبت نشده</li>
+          {% endfor %}
+        </ul>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="glass card">
+        <h2>نگهداری محلی</h2>
+        <form method="post" action="/settings/retention" class="form">
+          <label>تعداد فایل‌های نگهداری‌شده برای هر دیتابیس
+            <input type="number" name="keep_local" min="1" max="100" value="{{ keep_local }}" />
+          </label>
+          <button type="submit" class="btn primary">ذخیره</button>
+        </form>
+      </article>
+      <article class="glass card">
+        <h2>تغییر رمز پنل</h2>
+        <form method="post" action="/settings/password" class="form">
+          <label>رمز فعلی<input type="password" name="current" required /></label>
+          <label>رمز جدید<input type="password" name="new_password" required minlength="6" /></label>
+          <label>تأیید<input type="password" name="confirm" required minlength="6" /></label>
+          <button type="submit" class="btn primary">تغییر رمز</button>
+        </form>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const engine = document.getElementById('engine');
+    const net = document.querySelector('.net-fields');
+    const sqlite = document.querySelector('.sqlite-fields');
+    function sync() {
+      const isSqlite = engine.value === 'sqlite';
+      net.hidden = isSqlite;
+      sqlite.hidden = !isSqlite;
+    }
+    engine.addEventListener('change', sync);
+    sync();
+  </script>
+</body>
+</html>

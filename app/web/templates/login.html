@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ورود · Backup Glass</title>
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700&family=Outfit:wght@700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="login-body">
+  <div class="bg-layer"></div>
+  <div class="orb orb-a"></div>
+  <div class="orb orb-b"></div>
+  <form class="glass login" method="post" action="/login">
+    <div class="brand center">
+      <span class="mark">DB</span>
+      <h1>Backup Glass</h1>
+      <p>ورود به پنل مدیریت بکاپ</p>
+    </div>
+    {% if error %}
+    <div class="flash error">{{ error }}</div>
+    {% endif %}
+    <label>رمز پنل
+      <input type="password" name="password" required autofocus />
+    </label>
+    <button class="btn primary" type="submit">ورود</button>
+  </form>
+</body>
+</html>
