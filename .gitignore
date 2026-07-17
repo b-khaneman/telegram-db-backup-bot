@@ -8,6 +8,7 @@ data/state.json
 data/backups/
 *.sql
 *.gz
+*.zip
 *.log
 .DS_Store
 .idea/

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import gzip
 import logging
 import os
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass
+import zipfile
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,6 +20,15 @@ logger = logging.getLogger(__name__)
 # Telegram hard limit for Bot API files is 50 MB
 TELEGRAM_MAX_BYTES = 49 * 1024 * 1024
 
+# Telegram caption hard limit is 1024 characters
+CAPTION_MAX_CHARS = 1024
+
+
+@dataclass
+class ZipEntry:
+    name: str
+    size: int
+
 
 @dataclass
 class BackupResult:
@@ -31,6 +40,7 @@ class BackupResult:
     error: str | None = None
     duration_sec: float = 0.0
     compressed: bool = True
+    contents: list[ZipEntry] = field(default_factory=list)
 
 
 def _stamp(tz: str) -> str:
@@ -62,12 +72,26 @@ async def _run_cmd(
     return proc.returncode or 0, stdout, stderr
 
 
-async def _gzip_file(src: Path, dest: Path) -> None:
-    def _do() -> None:
-        with src.open("rb") as f_in, gzip.open(dest, "wb", compresslevel=6) as f_out:
-            shutil.copyfileobj(f_in, f_out, length=1024 * 1024)
+async def _zip_file(src: Path, dest: Path, arcname: str | None = None) -> list[ZipEntry]:
+    """Store dump inside a .zip archive; return contents with uncompressed sizes."""
 
-    await asyncio.to_thread(_do)
+    def _do() -> list[ZipEntry]:
+        name = arcname or src.name
+        with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            zf.write(src, arcname=name)
+            info = zf.getinfo(name)
+            return [ZipEntry(name=info.filename, size=info.file_size)]
+
+    return await asyncio.to_thread(_do)
+
+
+def list_zip_contents(path: Path) -> list[ZipEntry]:
+    with zipfile.ZipFile(path, "r") as zf:
+        return [
+            ZipEntry(name=i.filename, size=i.file_size)
+            for i in zf.infolist()
+            if not i.is_dir()
+        ]
 
 
 async def backup_mysql_family(db: DatabaseConfig, out_sql: Path) -> None:
@@ -163,7 +187,7 @@ async def create_backup(db: DatabaseConfig) -> BackupResult:
     started = time.perf_counter()
     stamp = _stamp(settings.timezone)
     base = f"{_safe_name(db.name)}_{db.engine.value}_{stamp}"
-    gz_path = settings.backup_dir / f"{base}.sql.gz"
+    zip_path = settings.backup_dir / f"{base}.zip"
 
     try:
         with tempfile.TemporaryDirectory(prefix="dbbak_") as tmp:
@@ -177,32 +201,37 @@ async def create_backup(db: DatabaseConfig) -> BackupResult:
             elif db.engine == DbEngine.SQLITE:
                 raw = tmp_path / f"{base}.db"
                 await backup_sqlite(db, raw)
-                gz_path = settings.backup_dir / f"{base}.db.gz"
             else:
                 raise ValueError(f"Unsupported engine: {db.engine}")
 
             if not raw.exists() or raw.stat().st_size == 0:
                 raise RuntimeError("خروجی بکاپ خالی است.")
 
-            await _gzip_file(raw, gz_path)
+            contents = await _zip_file(raw, zip_path, arcname=raw.name)
 
-        size = gz_path.stat().st_size
+        size = zip_path.stat().st_size
         _prune_old(db)
         result = BackupResult(
             ok=True,
             db_id=db.id,
             db_name=db.name,
-            path=gz_path,
+            path=zip_path,
             size=size,
             duration_sec=round(time.perf_counter() - started, 2),
             compressed=True,
+            contents=contents,
         )
         get_storage().record_backup_result(
-            True, db.name, size=size, path=str(gz_path), duration_sec=result.duration_sec
+            True, db.name, size=size, path=str(zip_path), duration_sec=result.duration_sec
         )
         return result
     except Exception as exc:  # noqa: BLE001 — surface to caller/UI
         logger.exception("Backup failed for %s", db.name)
+        if zip_path.exists():
+            try:
+                zip_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         result = BackupResult(
             ok=False,
             db_id=db.id,
@@ -221,8 +250,13 @@ def _prune_old(db: DatabaseConfig) -> None:
     storage = get_storage()
     keep = max(1, storage.state.keep_local_backups or settings.keep_local_backups)
     prefix = f"{_safe_name(db.name)}_{db.engine.value}_"
+    # Prefer .zip archives; also prune legacy .gz dumps for the same prefix
     files = sorted(
-        [p for p in settings.backup_dir.glob(f"{prefix}*") if p.is_file()],
+        [
+            p
+            for p in settings.backup_dir.glob(f"{prefix}*")
+            if p.is_file() and p.suffix.lower() in {".zip", ".gz"}
+        ],
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -231,6 +265,42 @@ def _prune_old(db: DatabaseConfig) -> None:
             old.unlink(missing_ok=True)
         except OSError:
             logger.warning("Could not delete old backup %s", old)
+
+
+def format_backup_caption(result: BackupResult, *, max_chars: int = CAPTION_MAX_CHARS) -> str:
+    """Build Telegram/HTML caption with DB name, archive size, and zip file list."""
+    header = (
+        f"🗄 <b>{result.db_name}</b>\n"
+        f"📦 آرشیو: {human_size(result.size)} · ⏱ {result.duration_sec}s\n"
+        f"<code>{result.path.name if result.path else '—'}</code>\n"
+        f"📁 محتویات:"
+    )
+    entries = list(result.contents)
+    if not entries and result.path and result.path.suffix.lower() == ".zip":
+        try:
+            entries = list_zip_contents(result.path)
+        except Exception:  # noqa: BLE001
+            entries = []
+
+    if not entries:
+        return header + "\n• —"
+
+    lines: list[str] = []
+    omitted = 0
+    for entry in entries:
+        line = f"• <code>{entry.name}</code> — {human_size(entry.size)}"
+        candidate = header + "\n" + "\n".join(lines + [line])
+        if len(candidate) > max_chars - 40:
+            omitted = len(entries) - len(lines)
+            break
+        lines.append(line)
+
+    body = header + "\n" + "\n".join(lines)
+    if omitted > 0:
+        more = f"\n… و {omitted} فایل دیگر"
+        if len(body) + len(more) <= max_chars:
+            body += more
+    return body[:max_chars]
 
 
 async def backup_all_enabled() -> list[BackupResult]:
@@ -256,13 +326,26 @@ def human_size(n: int) -> str:
 def list_backup_files(limit: int = 40) -> list[dict]:
     settings = get_settings()
     files = sorted(
-        [p for p in settings.backup_dir.glob("*") if p.is_file()],
+        [
+            p
+            for p in settings.backup_dir.glob("*")
+            if p.is_file() and p.suffix.lower() in {".zip", ".gz"}
+        ],
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )[:limit]
     out = []
     for p in files:
         st = p.stat()
+        contents: list[dict] = []
+        if p.suffix.lower() == ".zip":
+            try:
+                contents = [
+                    {"name": e.name, "size": e.size, "size_h": human_size(e.size)}
+                    for e in list_zip_contents(p)
+                ]
+            except Exception:  # noqa: BLE001
+                contents = []
         out.append(
             {
                 "name": p.name,
@@ -270,6 +353,7 @@ def list_backup_files(limit: int = 40) -> list[dict]:
                 "size": st.st_size,
                 "size_h": human_size(st.st_size),
                 "mtime": st.st_mtime,
+                "contents": contents,
             }
         )
     return out

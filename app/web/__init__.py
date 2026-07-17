@@ -319,9 +319,13 @@ def create_web_app() -> FastAPI:
             except Exception:  # noqa: BLE001
                 logger.exception("Notify failed")
         if result.ok and result.path:
-            request.session["flash"] = (
-                f"بکاپ {db.name} موفق — {human_size(result.size)} — {result.path}"
-            )
+            parts = [f"بکاپ {db.name} موفق — {human_size(result.size)} — {result.path.name}"]
+            if result.contents:
+                listed = ", ".join(
+                    f"{e.name} ({human_size(e.size)})" for e in result.contents[:8]
+                )
+                parts.append(f"محتویات: {listed}")
+            request.session["flash"] = " — ".join(parts)
         else:
             request.session["flash"] = f"خطا: {result.error}"
         return RedirectResponse("/", status_code=303)
@@ -334,6 +338,7 @@ def create_web_app() -> FastAPI:
         path = get_settings().backup_dir / safe
         if not path.exists() or not path.is_file():
             return RedirectResponse("/", status_code=303)
-        return FileResponse(path, filename=safe, media_type="application/gzip")
+        media = "application/zip" if path.suffix.lower() == ".zip" else "application/gzip"
+        return FileResponse(path, filename=safe, media_type=media)
 
     return app

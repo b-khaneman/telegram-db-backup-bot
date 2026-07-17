@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
-from app.backup import TELEGRAM_MAX_BYTES, BackupResult, create_backup, human_size
+from app.backup import TELEGRAM_MAX_BYTES, BackupResult, create_backup, format_backup_caption
 from app.bot import keyboards as kb
 from app.bot import texts
 from app.config import get_settings
@@ -56,11 +56,7 @@ async def send_backup_file(bot: Bot, chat_id: int, result: BackupResult) -> None
         )
         return
 
-    caption = (
-        f"🗄 <b>{result.db_name}</b>\n"
-        f"📦 {human_size(result.size)} · ⏱ {result.duration_sec}s\n"
-        f"<code>{result.path.name}</code>"
-    )
+    caption = format_backup_caption(result)
 
     if result.size > TELEGRAM_MAX_BYTES:
         await bot.send_message(

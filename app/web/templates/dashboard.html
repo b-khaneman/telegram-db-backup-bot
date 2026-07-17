@@ -174,17 +174,23 @@
         <p class="muted">دانلود از سرور</p>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>فایل</th><th>حجم</th><th>زمان</th><th></th></tr></thead>
+            <thead><tr><th>فایل</th><th>حجم</th><th>محتویات</th><th>زمان</th><th></th></tr></thead>
             <tbody>
               {% for h in history %}
               <tr>
                 <td class="mono small">{{ h.name }}</td>
                 <td>{{ h.size_h }}</td>
+                <td class="muted small">
+                  {% if h.contents %}
+                    {% for c in h.contents %}{{ c.name }} ({{ c.size_h }}){% if not loop.last %}<br>{% endif %}{% endfor %}
+                  {% else %}—
+                  {% endif %}
+                </td>
                 <td class="muted">{{ h.mtime_h }}</td>
                 <td><a class="btn tiny" href="/download/{{ h.name }}">دانلود</a></td>
               </tr>
               {% else %}
-              <tr><td colspan="4" class="empty">فایلی نیست</td></tr>
+              <tr><td colspan="5" class="empty">فایلی نیست</td></tr>
               {% endfor %}
             </tbody>
           </table>

@@ -96,7 +96,7 @@ def schedule_text(s: ScheduleConfig) -> str:
             f"آخرین اجرا: {last}",
             f"برنامه: {s.next_hint or '—'}",
             "",
-            "بکاپ‌ها به‌صورت gzip به تلگرام ارسال می‌شوند.",
+            "بکاپ‌ها به‌صورت ZIP به تلگرام ارسال می‌شوند.",
         ],
     )
 
@@ -105,7 +105,11 @@ def status_text() -> str:
     settings = get_settings()
     storage = get_storage()
     backups = sorted(
-        settings.backup_dir.glob("*.gz"),
+        [
+            p
+            for p in settings.backup_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in {".zip", ".gz"}
+        ],
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )[:8]
