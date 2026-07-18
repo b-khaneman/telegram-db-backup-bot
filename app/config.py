@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import Annotated, List
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -16,7 +16,8 @@ class Settings(BaseSettings):
     )
 
     bot_token: str = Field(..., alias="BOT_TOKEN")
-    admin_ids: List[int] = Field(default_factory=list, alias="ADMIN_IDS")
+    # NoDecode: keep raw CSV string so pydantic-settings doesn't try JSON-parsing "111,222"
+    admin_ids: Annotated[List[int], NoDecode] = Field(default_factory=list, alias="ADMIN_IDS")
     backup_chat_id: int | None = Field(default=None, alias="BACKUP_CHAT_ID")
 
     web_host: str = Field(default="0.0.0.0", alias="WEB_HOST")

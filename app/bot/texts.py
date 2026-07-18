@@ -115,7 +115,7 @@ def status_text() -> str:
     )[:8]
     lines = [
         f"مسیر بکاپ: <code>{settings.backup_dir}</code>",
-        f"نگهداری محلی: آخرین {settings.keep_local_backups} فایل",
+        f"نگهداری محلی: آخرین {storage.state.keep_local_backups} فایل",
         f"دیتابیس ثبت‌شده: {len(storage.list_databases())}",
         "",
         "آخرین فایل‌ها:",
