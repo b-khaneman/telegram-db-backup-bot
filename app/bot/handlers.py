@@ -532,16 +532,45 @@ async def _show_server_dbs(call: CallbackQuery, conn: DatabaseConfig) -> None:
     await call.answer()
 
 
-def _cached_pick(call: CallbackQuery) -> tuple[DatabaseConfig, str, int] | None:
-    """Resolve (connection, database name, index) from srv_db* callback data."""
+async def _edit_expired(call: CallbackQuery) -> None:
+    """Replace an unusable old panel with the connection picker."""
+    try:
+        await call.message.edit_text(  # type: ignore[union-attr]
+            texts.glass_box(
+                "مرور سرور",
+                ["این فهرست قدیمی است یا اتصال در دسترس نیست.", "دوباره انتخاب کنید:"],
+            ),
+            parse_mode="HTML",
+            reply_markup=kb.browse_connections_kb(_browsable_connections()),
+        )
+    except Exception:  # noqa: BLE001 — e.g. message unchanged; nothing to do
+        pass
+
+
+async def _resolve_pick(call: CallbackQuery) -> tuple[DatabaseConfig, str, int] | None:
+    """Resolve (connection, database name, index) from srv_db* callback data.
+
+    The cache is per-process, so buttons on old messages outlive a service
+    restart; when the cache is missing, transparently re-fetch the listing
+    so those buttons keep working instead of showing an expiry alert.
+    """
     try:
         _, conn_id, raw_index = call.data.split(":")  # type: ignore[union-attr]
         index = int(raw_index)
     except ValueError:
         return None
     conn = get_storage().get_database(conn_id)
-    names = _server_db_cache.get(conn_id, [])
-    if not conn or index < 0 or index >= len(names):
+    if not conn:
+        return None
+    names = _server_db_cache.get(conn_id)
+    if names is None:
+        try:
+            names = await list_server_databases(conn)
+        except Exception:  # noqa: BLE001
+            logger.exception("Re-fetching server databases failed for %s", conn.name)
+            return None
+        _server_db_cache[conn_id] = names
+    if index < 0 or index >= len(names):
         return None
     return conn, names[index], index
 
@@ -577,12 +606,12 @@ async def cb_browse_conn(call: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("srv_db:"))
 async def cb_srv_db_tables(call: CallbackQuery) -> None:
     """Picked a database: show its tables (phpMyAdmin-style) + backup button."""
-    pick = _cached_pick(call)
+    await call.answer("در حال خواندن جدول‌ها…")
+    pick = await _resolve_pick(call)
     if not pick:
-        await call.answer("فهرست منقضی شده — دوباره مرور کنید.", show_alert=True)
+        await _edit_expired(call)
         return
     conn, db_name, index = pick
-    await call.answer("در حال خواندن جدول‌ها…")
     try:
         tables = await list_database_tables(conn, db_name)
         text = texts.server_db_tables_text(conn, db_name, tables)
@@ -607,12 +636,12 @@ async def cb_srv_db_tables(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("srv_db_bk:"))
 async def cb_srv_db_backup(call: CallbackQuery, bot: Bot) -> None:
-    pick = _cached_pick(call)
+    await call.answer("بکاپ…")
+    pick = await _resolve_pick(call)
     if not pick:
-        await call.answer("فهرست منقضی شده — دوباره مرور کنید.", show_alert=True)
+        await _edit_expired(call)
         return
     conn, db_name, index = pick
-    await call.answer("بکاپ…")
     await call.message.edit_text(  # type: ignore[union-attr]
         texts.backup_progress_text(db_name),
         parse_mode="HTML",
@@ -632,9 +661,10 @@ async def cb_srv_db_backup(call: CallbackQuery, bot: Bot) -> None:
 
 @router.callback_query(F.data.startswith("srv_db_save:"))
 async def cb_srv_db_save(call: CallbackQuery) -> None:
-    pick = _cached_pick(call)
+    pick = await _resolve_pick(call)
     if not pick:
-        await call.answer("فهرست منقضی شده — دوباره مرور کنید.", show_alert=True)
+        await call.answer("فهرست در دسترس نیست — دوباره مرور کنید.", show_alert=True)
+        await _edit_expired(call)
         return
     conn, db_name, _index = pick
     exists = any(

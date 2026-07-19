@@ -2,7 +2,7 @@
 
 ربات تلگرام + پنل وب برای بکاپ **MySQL / MariaDB / PostgreSQL / SQLite**.
 
-- **بکاپ کامل و قابل بازیابی:** MySQL/MariaDB با `--databases` (شامل CREATE DATABASE) + routines/triggers/events؛ PostgreSQL با `--create`؛ SQLite با `.backup` سازگار.
+- **بکاپ کامل و قابل بازیابی:** MySQL/MariaDB به‌صورت **ZIP ساخت‌یافته** — هر جدول یک فایل `tables/<table>.sql` جدا + `00_header.sql` (CREATE DATABASE/USE) + `99_routines.sql` (روتین‌ها/eventها) + `README.txt` با ترتیب بازیابی؛ PostgreSQL با `--create`؛ SQLite با `.backup` سازگار.
 - **ارسال ZIP به تلگرام با فهرست کامل محتویات:** نام و حجم هر فایل داخل ZIP در کپشن؛ اگر فهرست در سقف ۱۰۲۴ کاراکتری کپشن جا نشود، ادامهٔ کامل فهرست در پیام(های) بعدی ارسال می‌شود — هیچ فایلی از قلم نمی‌افتد.
 
 > راهنمای کامل نصب فارسی همین صفحه است. نسخهٔ جدا: [docs/INSTALL-FA.md](docs/INSTALL-FA.md)

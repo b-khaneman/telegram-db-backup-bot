@@ -83,15 +83,17 @@ async def _run_cmd(
     return proc.returncode or 0, stdout, stderr
 
 
-async def _zip_file(src: Path, dest: Path, arcname: str | None = None) -> list[ZipEntry]:
-    """Store dump inside a .zip archive; return contents with uncompressed sizes."""
+async def _zip_files(files: list[tuple[Path, str]], dest: Path) -> list[ZipEntry]:
+    """Store (file, arcname) pairs in a .zip preserving order; return contents."""
 
     def _do() -> list[ZipEntry]:
-        name = arcname or src.name
+        entries: list[ZipEntry] = []
         with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            zf.write(src, arcname=name)
-            info = zf.getinfo(name)
-            return [ZipEntry(name=info.filename, size=info.file_size)]
+            for src, arcname in files:
+                zf.write(src, arcname=arcname)
+                info = zf.getinfo(arcname)
+                entries.append(ZipEntry(name=info.filename, size=info.file_size))
+        return entries
 
     return await asyncio.to_thread(_do)
 
@@ -151,6 +153,22 @@ def _mysql_dump_cmd(
     return cmd
 
 
+async def _attempt_with_gtid_retry(
+    base_cmd: list[str], env: dict[str, str]
+) -> tuple[int, bytes]:
+    """Run a dump command with the --set-gtid-purged retry.
+
+    MySQL 5.6+ writes GTID_PURGED into dumps which breaks restores on
+    other servers; mariadb-dump does not know this option, so retry
+    without it when the flag is rejected.
+    """
+    cmd = base_cmd[:1] + ["--set-gtid-purged=OFF"] + base_cmd[1:]
+    code, _, stderr = await _run_cmd(cmd, env=env)
+    if code != 0 and b"set-gtid-purged" in stderr:
+        code, _, stderr = await _run_cmd(base_cmd, env=env)
+    return code, stderr
+
+
 async def _attempt_mysql_dump(
     dumper: str,
     db: DatabaseConfig,
@@ -159,18 +177,8 @@ async def _attempt_mysql_dump(
     *,
     include_routines: bool = True,
 ) -> tuple[int, bytes]:
-    """Single dump attempt with the built-in --set-gtid-purged retry.
-
-    MySQL 5.6+ writes GTID_PURGED into dumps which breaks restores on
-    other servers; mariadb-dump does not know this option, so retry
-    without it when the flag is rejected.
-    """
     base_cmd = _mysql_dump_cmd(dumper, db, out_sql, include_routines=include_routines)
-    cmd = base_cmd[:1] + ["--set-gtid-purged=OFF"] + base_cmd[1:]
-    code, _, stderr = await _run_cmd(cmd, env=env)
-    if code != 0 and b"set-gtid-purged" in stderr:
-        code, _, stderr = await _run_cmd(base_cmd, env=env)
-    return code, stderr
+    return await _attempt_with_gtid_retry(base_cmd, env)
 
 
 async def backup_mysql_family(db: DatabaseConfig, out_sql: Path) -> str | None:
@@ -226,6 +234,154 @@ async def backup_mysql_family(db: DatabaseConfig, out_sql: Path) -> str | None:
         raise RuntimeError(stderr.decode("utf-8", errors="replace")[:800] or f"{dumper} failed")
     logger.warning("Backup of %s skipped routines/events (mysql.proc mismatch)", db.name)
     return ROUTINES_SKIPPED_WARNING
+
+
+_MYSQL_TABLE_FLAGS = [
+    "--single-transaction",
+    "--quick",
+    "--triggers",
+    "--hex-blob",
+    "--no-tablespaces",
+    "--default-character-set=utf8mb4",
+]
+
+
+def _mysql_conn_args(db: DatabaseConfig) -> list[str]:
+    return [f"--host={db.host}", f"--port={db.port}", f"--user={db.user}"]
+
+
+def _mysql_table_dump_cmd(dumper: str, db: DatabaseConfig, table: str, out: Path) -> list[str]:
+    return [
+        dumper,
+        *_mysql_conn_args(db),
+        *_MYSQL_TABLE_FLAGS,
+        "--result-file",
+        str(out),
+        db.database,
+        table,
+    ]
+
+
+def _mysql_routines_dump_cmd(dumper: str, db: DatabaseConfig, out: Path) -> list[str]:
+    return [
+        dumper,
+        *_mysql_conn_args(db),
+        "--no-data",
+        "--no-create-info",
+        "--routines",
+        "--events",
+        "--no-tablespaces",
+        "--default-character-set=utf8mb4",
+        "--result-file",
+        str(out),
+        db.database,
+    ]
+
+
+def _structured_readme(database: str) -> str:
+    return (
+        "Backup Glass — structured database backup\n"
+        f"Database: {database}\n"
+        "\n"
+        "Restore order:\n"
+        "  1) 00_header.sql   (CREATE DATABASE / USE)\n"
+        "  2) tables/*.sql    (schema + data + triggers, alphabetical)\n"
+        "  3) 99_routines.sql (stored routines & events, if present)\n"
+        "\n"
+        "Example:\n"
+        "  cat 00_header.sql tables/*.sql 99_routines.sql | mysql -u root -p\n"
+    )
+
+
+async def backup_mysql_structured(
+    db: DatabaseConfig, work_dir: Path, base: str
+) -> tuple[list[tuple[Path, str]], str | None]:
+    """Neat per-table dump: (file, arcname) pairs in restore order —
+    00_header.sql, tables/<table>.sql (alphabetical), 99_routines.sql,
+    README.txt. Falls back to the classic single-file dump whenever the
+    table listing or a per-table dump fails."""
+    dumpers = ["mysqldump", "mariadb-dump"]
+    if db.engine == DbEngine.MARIADB:
+        dumpers = ["mariadb-dump", "mysqldump"]
+    dumper = next((d for d in dumpers if shutil.which(d)), None)
+    if not dumper:
+        raise RuntimeError(
+            "mysqldump / mariadb-dump پیدا نشد. ابزار client دیتابیس را نصب کنید."
+        )
+
+    env = os.environ.copy()
+    if db.password:
+        env["MYSQL_PWD"] = db.password
+
+    async def single_file_fallback() -> tuple[list[tuple[Path, str]], str | None]:
+        raw = work_dir / f"{base}.sql"
+        warning = await backup_mysql_family(db, raw)
+        return [(raw, raw.name)], warning
+
+    try:
+        tables = sorted(name for name, _ in await list_database_tables(db, db.database))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Table listing failed (%s); using single-file dump", exc)
+        return await single_file_fallback()
+
+    files: list[tuple[Path, str]] = []
+    dbq = db.database.replace("`", "``")
+    header = work_dir / "00_header.sql"
+    header.write_text(
+        f"CREATE DATABASE IF NOT EXISTS `{dbq}` "
+        "/*!40100 DEFAULT CHARACTER SET utf8mb4 */;\n"
+        f"USE `{dbq}`;\n",
+        encoding="utf-8",
+    )
+    files.append((header, "00_header.sql"))
+
+    tables_dir = work_dir / "tables"
+    tables_dir.mkdir(exist_ok=True)
+    for i, table in enumerate(tables):
+        # Numbered on-disk name (table names may be unsafe on the local FS);
+        # the real table name goes into the archive name.
+        out = tables_dir / f"{i:04d}.sql"
+        code, stderr = await _attempt_with_gtid_retry(
+            _mysql_table_dump_cmd(dumper, db, table, out), env
+        )
+        if code != 0:
+            logger.warning(
+                "Per-table dump failed for %s (%s); using single-file dump",
+                table,
+                stderr.decode("utf-8", errors="replace")[:200],
+            )
+            return await single_file_fallback()
+        arc_table = table.replace("/", "_").replace("\\", "_")
+        files.append((out, f"tables/{arc_table}.sql"))
+
+    warning: str | None = None
+    routines = work_dir / "99_routines.sql"
+    code, stderr = await _attempt_with_gtid_retry(
+        _mysql_routines_dump_cmd(dumper, db, routines), env
+    )
+    if code != 0 and is_mysql_proc_mismatch(stderr):
+        alt = next((d for d in dumpers if d != dumper and shutil.which(d)), None)
+        if alt:
+            code, stderr = await _attempt_with_gtid_retry(
+                _mysql_routines_dump_cmd(alt, db, routines), env
+            )
+    if code == 0:
+        files.append((routines, "99_routines.sql"))
+    else:
+        # Routines are an extra: never fail a backup whose tables are all dumped
+        warning = ROUTINES_SKIPPED_WARNING if is_mysql_proc_mismatch(stderr) else (
+            "روتین‌ها و eventها در این بکاپ نیامدند."
+        )
+        logger.warning(
+            "Routines dump skipped for %s: %s",
+            db.name,
+            stderr.decode("utf-8", errors="replace")[:200],
+        )
+
+    readme = work_dir / "README.txt"
+    readme.write_text(_structured_readme(db.database), encoding="utf-8")
+    files.append((readme, "README.txt"))
+    return files, warning
 
 
 # Not user data; hidden from the server-browse listing by default
@@ -437,22 +593,26 @@ async def create_backup(db: DatabaseConfig) -> BackupResult:
         warning: str | None = None
         with tempfile.TemporaryDirectory(prefix="dbbak_") as tmp:
             tmp_path = Path(tmp)
-            raw = tmp_path / f"{base}.sql"
 
             if db.engine in (DbEngine.MYSQL, DbEngine.MARIADB):
-                warning = await backup_mysql_family(db, raw)
+                # Neat structured export: header + per-table files + routines
+                files, warning = await backup_mysql_structured(db, tmp_path, base)
             elif db.engine == DbEngine.POSTGRESQL:
+                raw = tmp_path / f"{base}.sql"
                 await backup_postgresql(db, raw)
+                files = [(raw, raw.name)]
             elif db.engine == DbEngine.SQLITE:
                 raw = tmp_path / f"{base}.db"
                 await backup_sqlite(db, raw)
+                files = [(raw, raw.name)]
             else:
                 raise ValueError(f"Unsupported engine: {db.engine}")
 
-            if not raw.exists() or raw.stat().st_size == 0:
+            files = [(p, a) for p, a in files if p.exists()]
+            if not files or sum(p.stat().st_size for p, _ in files) == 0:
                 raise RuntimeError("خروجی بکاپ خالی است.")
 
-            contents = await _zip_file(raw, zip_path, arcname=raw.name)
+            contents = await _zip_files(files, zip_path)
 
         size = zip_path.stat().st_size
         _prune_old(db)
