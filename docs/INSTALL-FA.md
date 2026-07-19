@@ -18,14 +18,21 @@ cd telegram-db-backup-bot
 - آیدی عددی ادمین تلگرام
 - برای webhook: دامنه HTTPS که به پورت پنل پروکسی شود
 
-## نصب یک‌خطی (تعاملی)
+## منوی مدیریت / نصب
 
 ```bash
 chmod +x scripts/install-ubuntu.sh scripts/restart-service.sh
 sudo bash scripts/install-ubuntu.sh
 ```
 
-### سوال‌های اسکریپت
+منوی پیش‌فرض: **۱ نصب** · **۲ آپدیت از GitHub** · **۳ ری‌استارت** · **۴ وضعیت/لاگ** · **۵ واردات پاسارگارد** · **۰ خروج**
+
+```bash
+sudo bash scripts/install-ubuntu.sh update      # میانبر آپدیت
+sudo bash scripts/install-ubuntu.sh pasarguard  # واردات DB پاسارگارد
+```
+
+### سوال‌های مسیر نصب (گزینه ۱)
 
 1. **BOT_TOKEN** — اعتبارسنجی با API تلگرام  
 2. **ADMIN_IDS** — عدد(ها) با کاما  
@@ -35,8 +42,11 @@ sudo bash scripts/install-ubuntu.sh
 6. بازه بکاپ دقیقه‌ای (پیش‌فرض ۱۵)  
 7. دیتابیس: تشخیص خودکار یا دستی  
 
+برای پاسارگارد: `pasarguard edit-env` سپس گزینهٔ ۵ منو، یا تشخیص خودکار هنگام نصب. مقدار از `SQLALCHEMY_DATABASE_URL` در `/opt/pasarguard/.env` خوانده می‌شود.
+
 مسیر نصب پیش‌فرض: `/opt/telegram-db-backup-bot`  
-سرویس: `backup-bot`
+سرویس: `backup-bot`  
+آپدیت `.env` و `data/` را overwrite نمی‌کند.
 
 ## بعد از نصب
 
@@ -64,10 +74,7 @@ cp .env.example .env
 ## به‌روزرسانی
 
 ```bash
-cd /path/to/telegram-db-backup-bot
-git pull origin main
-# همگام‌سازی به /opt و ری‌استارت — ببینید README بخش «به‌روزرسانی از گیت»
-sudo systemctl restart backup-bot
+sudo bash /opt/telegram-db-backup-bot/scripts/install-ubuntu.sh update
 ```
 
-`.env` و `data/` را نگه دارید؛ overwrite نکنید.
+یا از منو گزینهٔ ۲. `.env` و `data/` حفظ می‌شوند.

@@ -40,16 +40,37 @@ git clone https://github.com/b-khaneman/telegram-db-backup-bot.git
 cd telegram-db-backup-bot
 ```
 
-### ۲) اجرای اسکریپت نصب تعاملی
+### ۲) منوی مدیریت (نصب / آپدیت / سرویس)
 
 ```bash
 chmod +x scripts/install-ubuntu.sh scripts/restart-service.sh
 sudo bash scripts/install-ubuntu.sh
 ```
 
-اسکریپت این کارها را انجام می‌دهد:
+به‌صورت پیش‌فرض **منوی فارسی** باز می‌شود:
 
-1. نصب بسته‌های سیستم (Python، کلاینت‌های دیتابیس، …)
+| گزینه | کار |
+|------|-----|
+| ۱ | نصب / نصب مجدد |
+| ۲ | به‌روزرسانی از GitHub (`origin/main`) بدون بازنویسی `.env` و `data/` |
+| ۳ | ری‌استارت سرویس `backup-bot` |
+| ۴ | وضعیت / لاگ |
+| ۵ | واردات دیتابیس پاسارگارد از `/opt/pasarguard/.env` |
+| ۰ | خروج |
+
+میانبر بدون منو:
+
+```bash
+sudo bash scripts/install-ubuntu.sh install
+sudo bash scripts/install-ubuntu.sh update
+sudo bash scripts/install-ubuntu.sh restart
+sudo bash scripts/install-ubuntu.sh status
+sudo bash scripts/install-ubuntu.sh pasarguard
+```
+
+مسیر نصب کامل (گزینه ۱) این کارها را انجام می‌دهد:
+
+1. نصب بسته‌های سیستم (Python، کلاینت‌های دیتابیس، git، …)
 2. کپی پروژه به `/opt/telegram-db-backup-bot`
 3. ساخت venv و نصب وابستگی‌ها
 4. پرسیدن تنظیمات (توکن، ادمین، webhook، پنل، دیتابیس)
@@ -90,9 +111,20 @@ sudo ufw allow 8080/tcp
 
 **تشخیص خودکار** از این‌ها می‌خواند:
 
+- پاسارگارد: متغیر `SQLALCHEMY_DATABASE_URL` از `/opt/pasarguard/.env`
 - `~/.my.cnf` / `/root/.my.cnf` / `/etc/mysql/debian.cnf`
 - WordPress: `wp-config.php` در `/var/www`
 - `docker-compose.yml` با متغیرهای MySQL/MariaDB/Postgres
+
+برای پنل پاسارگارد:
+
+```bash
+pasarguard edit-env
+sudo bash scripts/install-ubuntu.sh          # منو → ۵ واردات پاسارگارد
+# یا هنگام نصب، تشخیص خودکار گزینهٔ اول
+```
+
+نصب‌کننده اتصال MySQL، MariaDB، PostgreSQL/TimescaleDB یا SQLite پاسارگارد را از URL می‌خواند. برای SQLite نسبی، مسیر `/var/lib/pasarguard` اولویت دارد. رمزهای URL-encoded نیز decode می‌شوند.
 
 **ورود دستی:** موتور (mysql / mariadb / postgresql / sqlite) + هاست، پورت، کاربر، رمز، نام دیتابیس (یا مسیر فایل SQLite).
 
@@ -200,25 +232,26 @@ python main.py
 
 ## به‌روزرسانی از گیت
 
-روی سرور (مسیر کلون اولیه یا `/opt/...`):
+ساده‌ترین راه از منوی اسکریپت:
+
+```bash
+sudo bash /opt/telegram-db-backup-bot/scripts/install-ubuntu.sh update
+# یا: sudo bash scripts/install-ubuntu.sh   → گزینه ۲
+```
+
+این کار `git pull` (یا کلون موقت از GitHub)، همگام‌سازی به `/opt/telegram-db-backup-bot` **بدون** بازنویسی `.env` و `data/`، نصب وابستگی‌ها و ری‌استارت `backup-bot` را انجام می‌دهد.
+
+دستی:
 
 ```bash
 cd /path/to/telegram-db-backup-bot
 git pull origin main
-```
-
-سپس اگر از نصب Ubuntu استفاده کرده‌اید، دوباره اسکریپت را اجرا کنید تا فایل‌ها به `/opt/telegram-db-backup-bot` همگام شوند، **یا** به‌صورت دستی:
-
-```bash
 sudo rsync -a --exclude '.venv/' --exclude '__pycache__/' --exclude '.git/' \
   --exclude 'data/' --exclude '.env' \
   ./ /opt/telegram-db-backup-bot/
-
 sudo -u backupbot /opt/telegram-db-backup-bot/.venv/bin/pip install -r /opt/telegram-db-backup-bot/requirements.txt
 sudo systemctl restart backup-bot
 ```
-
-`.env` و پوشه `data/` را پاک یا overwrite نکنید.
 
 ---
 
