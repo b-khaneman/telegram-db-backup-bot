@@ -102,24 +102,106 @@ parse_pasarguard_env() {
   [[ -r "$env_file" ]] || return 1
   PASARGUARD_ENV="$env_file" PASARGUARD_DATA_DIR="$PASARGUARD_DATA_DIR" python3 - <<'PY'
 import os
+import re
+import sys
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 env_path = Path(os.environ["PASARGUARD_ENV"])
 data_dir = Path(os.environ.get("PASARGUARD_DATA_DIR", "/var/lib/pasarguard"))
-raw_url = ""
-for raw_line in env_path.read_text(encoding="utf-8-sig").splitlines():
-    line = raw_line.strip()
-    if not line or line.startswith("#") or "=" not in line:
-        continue
-    key, value = line.split("=", 1)
-    if key.strip() != "SQLALCHEMY_DATABASE_URL":
-        continue
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        value = value[1:-1]
-    raw_url = value.strip()
-    break
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return out
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        out[key.strip()] = value.strip()
+    return out
+
+def parse_compose_environment(path: Path) -> dict[str, str]:
+    """Best-effort scrape of `environment:` KEY=VAL / KEY: VAL entries."""
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return out
+    for m in re.finditer(
+        r"^\s*-?\s*([A-Z][A-Z0-9_]*)\s*[:=]\s*[\"']?([^\"'\n#]+)[\"']?\s*$",
+        text,
+        flags=re.M,
+    ):
+        key, value = m.group(1), m.group(2).strip()
+        if key not in out and "${" not in value:
+            out[key] = value
+    return out
+
+env_vars = parse_env_file(env_path)
+raw_url = env_vars.get("SQLALCHEMY_DATABASE_URL", "")
+
+# Aliases used when PasarGuard URL references vars defined elsewhere
+# (typically docker-compose.yml of the bundled MySQL/MariaDB/Postgres).
+ALIASES = {
+    "DB_USER": ["MYSQL_USER", "MARIADB_USER", "POSTGRES_USER"],
+    "DB_PASSWORD": [
+        "MYSQL_PASSWORD", "MARIADB_PASSWORD", "POSTGRES_PASSWORD",
+        "MYSQL_ROOT_PASSWORD", "MARIADB_ROOT_PASSWORD",
+    ],
+    "DB_NAME": ["MYSQL_DATABASE", "MARIADB_DATABASE", "POSTGRES_DB"],
+    "DB_HOST": [],
+    "DB_PORT": [],
+}
+
+compose_vars: dict[str, str] = {}
+for compose in (env_path.parent / "docker-compose.yml", env_path.parent / "docker-compose.yaml"):
+    if compose.is_file():
+        compose_vars = parse_compose_environment(compose)
+        break
+
+def resolve_var(name: str) -> str | None:
+    if name in env_vars and "${" not in env_vars[name]:
+        return env_vars[name]
+    if name in os.environ:
+        return os.environ[name]
+    if name in compose_vars:
+        return compose_vars[name]
+    for alias in ALIASES.get(name, []):
+        for source in (env_vars, compose_vars):
+            if alias in source and "${" not in source[alias]:
+                return source[alias]
+    return None
+
+def expand_placeholders(url: str) -> str:
+    def sub(m: re.Match) -> str:
+        name = m.group(1) or m.group(2)
+        value = resolve_var(name)
+        return value if value is not None else m.group(0)
+
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)", sub, url)
+
+if raw_url:
+    raw_url = expand_placeholders(raw_url)
+
+UNRESOLVED = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+
+def clean_field(value: str, label: str) -> str:
+    """Never emit literal ${VAR} credentials; blank them so bash prompts."""
+    if UNRESOLVED.search(value):
+        print(f"WARN unresolved {label}: {value}", file=sys.stderr)
+        return ""
+    return value
+
+# MySQL/MariaDB/Postgres inside docker often use compose service hostnames
+# that are unreachable from the host; map them to 127.0.0.1.
+DOCKER_HOSTS = {"mysql", "mariadb", "postgres", "postgresql", "timescaledb", "db", "database"}
 
 if not raw_url:
     pass
@@ -157,13 +239,21 @@ else:
             db_path = str((env_path.parent / db_path).resolve())
         fields = [engine, "", "0", "", "", Path(db_path).name, db_path]
     else:
+        host = clean_field(parsed.hostname or "127.0.0.1", "host") or "127.0.0.1"
+        if host.lower() in DOCKER_HOSTS:
+            print(f"WARN docker host '{host}' mapped to 127.0.0.1", file=sys.stderr)
+            host = "127.0.0.1"
+        try:
+            port = str(parsed.port or default_port)
+        except ValueError:
+            port = str(default_port)
         fields = [
             engine,
-            parsed.hostname or "127.0.0.1",
-            str(parsed.port or default_port),
-            unquote(parsed.username or ""),
-            unquote(parsed.password or ""),
-            unquote((parsed.path or "").lstrip("/").split("?", 1)[0]),
+            host,
+            port,
+            clean_field(unquote(parsed.username or ""), "user"),
+            clean_field(unquote(parsed.password or ""), "password"),
+            clean_field(unquote((parsed.path or "").lstrip("/").split("?", 1)[0]), "dbname"),
             "",
         ]
 
@@ -217,6 +307,27 @@ detect_candidates() {
     [[ -z "$name" ]] && continue
     n=$((n+1))
     DETECTED_LINES+=("${n}|${eng}|127.0.0.1|${port}|${user:-root}|${pass}|docker:${dc}|${name}|")
+  done
+}
+
+# Prompt for connection fields detectors could not resolve safely
+# (e.g. PasarGuard URLs with unexpanded ${DB_USER} placeholders).
+fill_missing_db_fields() {
+  [[ "$DB_ENGINE" == "sqlite" ]] && return 0
+  if [[ -z "$DB_USER" || -z "$DB_PASS" || -z "$DB_NAME" ]]; then
+    echo "⚠️ بخشی از اطلاعات اتصال ناقص است (متغیر حل‌نشده در URL پاسارگارد یا مقدار خالی)."
+    echo "   مقادیر را تکمیل/تأیید کنید:"
+  fi
+  DB_HOST="$(prompt 'هاست' "${DB_HOST:-127.0.0.1}")"
+  DB_PORT="$(prompt 'پورت' "${DB_PORT:-3306}")"
+  while [[ -z "$DB_USER" ]]; do
+    DB_USER="$(prompt 'کاربر دیتابیس')"
+  done
+  if [[ -z "$DB_PASS" ]]; then
+    DB_PASS="$(prompt_secret 'رمز دیتابیس (خالی OK)')"
+  fi
+  while [[ -z "$DB_NAME" ]]; do
+    DB_NAME="$(prompt 'نام دیتابیس هدف')"
   done
 }
 
@@ -425,6 +536,7 @@ do_install() {
           IFS='|' read -r _ DB_ENGINE DB_HOST DB_PORT DB_USER DB_PASS _SRC DB_NAME DB_FILE <<< "$SEL"
           if [[ "$DB_ENGINE" != "sqlite" ]]; then
             DB_NAME="$(prompt 'نام دیتابیس هدف' "${DB_NAME}")"
+            fill_missing_db_fields
           fi
           DB_DISPLAY="$(prompt 'نام نمایشی' "${DB_NAME:-pasarguard}")"
         fi
@@ -624,6 +736,9 @@ do_import_pasarguard() {
 
   local DB_ENGINE DB_HOST DB_PORT DB_USER DB_PASS DB_NAME DB_FILE DB_DISPLAY
   IFS='|' read -r DB_ENGINE DB_HOST DB_PORT DB_USER DB_PASS DB_NAME DB_FILE <<< "$fields"
+  if [[ "$DB_ENGINE" != "sqlite" ]]; then
+    fill_missing_db_fields
+  fi
   DB_DISPLAY="$(prompt 'نام نمایشی' "${DB_NAME:-pasarguard}")"
   if [[ "$DB_ENGINE" == "sqlite" ]]; then
     echo "موتور: sqlite"
