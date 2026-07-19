@@ -9,7 +9,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
-from app.backup import TELEGRAM_MAX_BYTES, BackupResult, create_backup, format_backup_caption
+from app.backup import (
+    TELEGRAM_MAX_BYTES,
+    BackupResult,
+    create_backup,
+    format_backup_caption_ex,
+    zip_listing_messages,
+)
 from app.bot import keyboards as kb
 from app.bot import texts
 from app.config import get_settings
@@ -56,7 +62,7 @@ async def send_backup_file(bot: Bot, chat_id: int, result: BackupResult) -> None
         )
         return
 
-    caption = format_backup_caption(result)
+    caption, omitted = format_backup_caption_ex(result)
 
     if result.size > TELEGRAM_MAX_BYTES:
         await bot.send_message(
@@ -65,14 +71,22 @@ async def send_backup_file(bot: Bot, chat_id: int, result: BackupResult) -> None
             f"مسیر سرور: <code>{result.path}</code>",
             parse_mode="HTML",
         )
-        return
+    else:
+        await bot.send_document(
+            chat_id,
+            document=FSInputFile(result.path),
+            caption=caption,
+            parse_mode="HTML",
+        )
 
-    await bot.send_document(
-        chat_id,
-        document=FSInputFile(result.path),
-        caption=caption,
-        parse_mode="HTML",
-    )
+    # Caption is capped at 1024 chars; when entries were omitted, deliver the
+    # complete archive listing in follow-up messages (no silent truncation).
+    if omitted > 0:
+        for msg in zip_listing_messages(result):
+            try:
+                await bot.send_message(chat_id, msg, parse_mode="HTML")
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to send zip listing chunk")
 
 
 async def run_and_deliver(

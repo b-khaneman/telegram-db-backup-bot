@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.backup import human_size
+from app.backup import h, human_size
 from app.config import get_settings
 from app.storage import DatabaseConfig, ScheduleConfig, get_storage
 
@@ -135,5 +135,5 @@ def backup_progress_text(name: str) -> str:
 
 def backup_done_line(ok: bool, name: str, size: int, duration: float, err: str | None) -> str:
     if ok:
-        return f"✅ <b>{name}</b> — {human_size(size)} · {duration}s"
-    return f"❌ <b>{name}</b> — {err or 'خطا'}"
+        return f"✅ <b>{h(name)}</b> — {human_size(size)} · {duration}s"
+    return f"❌ <b>{h(name)}</b> — {h(err) if err else 'خطا'}"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import shutil
@@ -22,6 +23,14 @@ TELEGRAM_MAX_BYTES = 49 * 1024 * 1024
 
 # Telegram caption hard limit is 1024 characters
 CAPTION_MAX_CHARS = 1024
+
+# Telegram message hard limit is 4096 characters; keep a safety margin
+MESSAGE_MAX_CHARS = 3900
+
+
+def h(text: str) -> str:
+    """Escape <, > and & for Telegram HTML parse mode."""
+    return html.escape(str(text), quote=False)
 
 
 @dataclass
@@ -110,7 +119,7 @@ async def backup_mysql_family(db: DatabaseConfig, out_sql: Path) -> None:
     if db.password:
         env["MYSQL_PWD"] = db.password
 
-    cmd = [
+    base_cmd = [
         dumper,
         f"--host={db.host}",
         f"--port={db.port}",
@@ -121,12 +130,21 @@ async def backup_mysql_family(db: DatabaseConfig, out_sql: Path) -> None:
         "--triggers",
         "--events",
         "--hex-blob",
+        "--no-tablespaces",
         "--default-character-set=utf8mb4",
         "--result-file",
         str(out_sql),
+        # Full restorable dump: include CREATE DATABASE / USE statements
+        "--databases",
         db.database,
     ]
+    # MySQL 5.6+ writes GTID_PURGED into dumps which breaks restores on
+    # other servers; mariadb-dump does not know this option, so retry
+    # without it when the flag is rejected.
+    cmd = base_cmd[:1] + ["--set-gtid-purged=OFF"] + base_cmd[1:]
     code, _, stderr = await _run_cmd(cmd, env=env)
+    if code != 0 and b"set-gtid-purged" in stderr:
+        code, _, stderr = await _run_cmd(base_cmd, env=env)
     if code != 0:
         raise RuntimeError(stderr.decode("utf-8", errors="replace")[:800] or f"{dumper} failed")
 
@@ -151,6 +169,8 @@ async def backup_postgresql(db: DatabaseConfig, out_sql: Path) -> None:
         db.database,
         "-F",
         "p",
+        # Full restorable dump: CREATE DATABASE + reconnect before restoring objects
+        "--create",
         "--no-owner",
         "--no-acl",
         "-f",
@@ -267,40 +287,102 @@ def _prune_old(db: DatabaseConfig) -> None:
             logger.warning("Could not delete old backup %s", old)
 
 
-def format_backup_caption(result: BackupResult, *, max_chars: int = CAPTION_MAX_CHARS) -> str:
-    """Build Telegram/HTML caption with DB name, archive size, and zip file list."""
-    header = (
-        f"🗄 <b>{result.db_name}</b>\n"
-        f"📦 آرشیو: {human_size(result.size)} · ⏱ {result.duration_sec}s\n"
-        f"<code>{result.path.name if result.path else '—'}</code>\n"
-        f"📁 محتویات:"
-    )
+def backup_entries(result: BackupResult) -> list[ZipEntry]:
+    """All non-directory archive members with uncompressed sizes."""
     entries = list(result.contents)
     if not entries and result.path and result.path.suffix.lower() == ".zip":
         try:
             entries = list_zip_contents(result.path)
         except Exception:  # noqa: BLE001
             entries = []
+    return entries
+
+
+def _caption_header(result: BackupResult) -> str:
+    return (
+        f"🗄 <b>{h(result.db_name)}</b>\n"
+        f"📦 آرشیو: {human_size(result.size)} · ⏱ {result.duration_sec}s\n"
+        f"<code>{h(result.path.name) if result.path else '—'}</code>\n"
+        f"📁 محتویات:"
+    )
+
+
+def _entry_line(entry: ZipEntry) -> str:
+    return f"• <code>{h(entry.name)}</code> — {human_size(entry.size)}"
+
+
+def format_backup_caption_ex(
+    result: BackupResult, *, max_chars: int = CAPTION_MAX_CHARS
+) -> tuple[str, int]:
+    """Telegram/HTML caption + number of entries that did not fit.
+
+    When entries are omitted the complete listing must be delivered via
+    zip_listing_messages(); nothing is silently truncated.
+    """
+    header = _caption_header(result)
+    entries = backup_entries(result)
 
     if not entries:
-        return header + "\n• —"
+        return header + "\n• —", 0
 
     lines: list[str] = []
     omitted = 0
     for entry in entries:
-        line = f"• <code>{entry.name}</code> — {human_size(entry.size)}"
+        line = _entry_line(entry)
         candidate = header + "\n" + "\n".join(lines + [line])
-        if len(candidate) > max_chars - 40:
+        if len(candidate) > max_chars - 60:
             omitted = len(entries) - len(lines)
             break
         lines.append(line)
 
     body = header + "\n" + "\n".join(lines)
     if omitted > 0:
-        more = f"\n… و {omitted} فایل دیگر"
+        more = f"\n… و {omitted} فایل دیگر — فهرست کامل در پیام بعدی"
         if len(body) + len(more) <= max_chars:
             body += more
-    return body[:max_chars]
+    return body[:max_chars], omitted
+
+
+def format_backup_caption(result: BackupResult, *, max_chars: int = CAPTION_MAX_CHARS) -> str:
+    return format_backup_caption_ex(result, max_chars=max_chars)[0]
+
+
+def zip_listing_messages(
+    result: BackupResult, *, max_chars: int = MESSAGE_MAX_CHARS
+) -> list[str]:
+    """Complete archive listing as HTML messages, chunked under Telegram's
+    4096-char message limit. Every entry appears exactly once."""
+    entries = backup_entries(result)
+    if not entries:
+        return []
+
+    total = len(entries)
+    chunks: list[str] = []
+    current: list[str] = []
+
+    def title(part: int) -> str:
+        return f"📁 <b>{h(result.db_name)}</b> — فهرست کامل ({total} فایل) — بخش {part}:"
+
+    part = 1
+    current_len = len(title(part)) + 1
+    for entry in entries:
+        line = _entry_line(entry)
+        if current and current_len + len(line) + 1 > max_chars:
+            chunks.append(title(part) + "\n" + "\n".join(current))
+            part += 1
+            current = []
+            current_len = len(title(part)) + 1
+        current.append(line)
+        current_len += len(line) + 1
+    if current:
+        chunks.append(title(part) + "\n" + "\n".join(current))
+
+    if len(chunks) == 1:
+        only = f"📁 <b>{h(result.db_name)}</b> — فهرست کامل ({total} فایل):\n" + \
+            "\n".join(_entry_line(e) for e in entries)
+        if len(only) <= max_chars:
+            return [only]
+    return chunks
 
 
 async def backup_all_enabled() -> list[BackupResult]:
