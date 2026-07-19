@@ -14,6 +14,7 @@ from app.backup import (
     BackupResult,
     create_backup,
     format_backup_caption_ex,
+    list_database_tables,
     list_server_databases,
     zip_listing_messages,
 )
@@ -574,6 +575,37 @@ async def cb_browse_conn(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("srv_db:"))
+async def cb_srv_db_tables(call: CallbackQuery) -> None:
+    """Picked a database: show its tables (phpMyAdmin-style) + backup button."""
+    pick = _cached_pick(call)
+    if not pick:
+        await call.answer("فهرست منقضی شده — دوباره مرور کنید.", show_alert=True)
+        return
+    conn, db_name, index = pick
+    await call.answer("در حال خواندن جدول‌ها…")
+    try:
+        tables = await list_database_tables(conn, db_name)
+        text = texts.server_db_tables_text(conn, db_name, tables)
+    except Exception as exc:  # noqa: BLE001
+        # Table listing may be blocked (grants); the dump can still work,
+        # so keep offering the backup button.
+        text = texts.glass_box(
+            f"دیتابیس · {texts.h(db_name)}",
+            [
+                "فهرست جدول‌ها خوانده نشد:",
+                f"<code>{texts.h(str(exc)[:300])}</code>",
+                "",
+                "می‌توانید همچنان بکاپ کامل بگیرید.",
+            ],
+        )
+    await call.message.edit_text(  # type: ignore[union-attr]
+        text,
+        parse_mode="HTML",
+        reply_markup=kb.server_db_detail_kb(conn.id, index),
+    )
+
+
+@router.callback_query(F.data.startswith("srv_db_bk:"))
 async def cb_srv_db_backup(call: CallbackQuery, bot: Bot) -> None:
     pick = _cached_pick(call)
     if not pick:

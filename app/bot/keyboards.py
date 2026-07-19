@@ -68,6 +68,26 @@ def server_dbs_kb(conn_id: str, names: list[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def server_db_detail_kb(conn_id: str, index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⬇️ دریافت بکاپ کامل", callback_data=f"srv_db_bk:{conn_id}:{index}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💾 ذخیره در فهرست", callback_data=f"srv_db_save:{conn_id}:{index}"
+                ),
+                InlineKeyboardButton(
+                    text="◀️ فهرست دیتابیس‌ها", callback_data=f"browse:{conn_id}"
+                ),
+            ],
+        ]
+    )
+
+
 def after_server_backup_kb(conn_id: str, index: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

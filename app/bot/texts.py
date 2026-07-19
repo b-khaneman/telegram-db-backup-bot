@@ -137,8 +137,30 @@ def server_dbs_text(conn: DatabaseConfig, names: list[str]) -> str:
     ]
     for i, name in enumerate(names, 1):
         lines.append(f"{i}. <code>{h(name)}</code>")
-    lines += ["", "برای بکاپ کامل، یکی را انتخاب کنید."]
+    lines += ["", "یکی را انتخاب کنید تا جدول‌ها و گزینه بکاپ را ببینید."]
     return glass_box("دیتابیس‌های سرور", lines)
+
+
+# Keep glass panels comfortably under Telegram's 4096-char message limit
+MAX_TABLE_LINES = 40
+
+
+def server_db_tables_text(
+    conn: DatabaseConfig, db_name: str, tables: list[tuple[str, int]]
+) -> str:
+    lines = [
+        f"سرور: <code>{h(conn.host)}:{conn.port}</code> [{conn.engine.value}]",
+        f"جدول‌ها: <b>{len(tables)}</b>",
+        "",
+    ]
+    if not tables:
+        lines.append("جدولی یافت نشد (دیتابیس خالی است).")
+    for i, (name, size) in enumerate(tables[:MAX_TABLE_LINES], 1):
+        lines.append(f"{i}. <code>{h(name)}</code> — {human_size(size)}")
+    if len(tables) > MAX_TABLE_LINES:
+        lines.append(f"… و {len(tables) - MAX_TABLE_LINES} جدول دیگر")
+    lines += ["", "برای بکاپ کامل دکمه زیر را بزنید."]
+    return glass_box(f"دیتابیس · {h(db_name)}", lines)
 
 
 def backup_progress_text(name: str) -> str:

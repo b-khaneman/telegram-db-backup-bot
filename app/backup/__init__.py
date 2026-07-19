@@ -289,6 +289,90 @@ async def list_server_databases(db: DatabaseConfig) -> list[str]:
     raise RuntimeError("مرور سرور برای SQLite معنا ندارد (تک‌فایل است).")
 
 
+async def list_database_tables(db: DatabaseConfig, database: str) -> list[tuple[str, int]]:
+    """Tables of `database` with on-disk size in bytes (phpMyAdmin-style).
+
+    Uses the connection credentials of `db`; `database` may differ from
+    db.database (picked from the server browse list).
+    """
+    if db.engine in (DbEngine.MYSQL, DbEngine.MARIADB):
+        clients = ["mysql", "mariadb"]
+        if db.engine == DbEngine.MARIADB:
+            clients = ["mariadb", "mysql"]
+        client = next((c for c in clients if shutil.which(c)), None)
+        if not client:
+            raise RuntimeError("کلاینت mysql/mariadb نصب نیست")
+        env = os.environ.copy()
+        if db.password:
+            env["MYSQL_PWD"] = db.password
+        schema = database.replace("\\", "\\\\").replace("'", "''")
+        query = (
+            "SELECT TABLE_NAME, COALESCE(DATA_LENGTH,0)+COALESCE(INDEX_LENGTH,0) "
+            "FROM information_schema.tables "
+            f"WHERE TABLE_SCHEMA='{schema}' AND TABLE_TYPE='BASE TABLE' "
+            "ORDER BY TABLE_NAME"
+        )
+        cmd = [
+            client,
+            f"-h{db.host}",
+            f"-P{db.port}",
+            f"-u{db.user}",
+            "-N",
+            "-B",
+            "-e",
+            query,
+        ]
+        code, stdout, stderr = await _run_cmd(cmd, env=env, timeout=30)
+        if code != 0:
+            raise RuntimeError(
+                stderr.decode("utf-8", errors="replace")[:300] or "listing tables failed"
+            )
+    elif db.engine == DbEngine.POSTGRESQL:
+        if not shutil.which("psql"):
+            raise RuntimeError("psql نصب نیست")
+        env = os.environ.copy()
+        if db.password:
+            env["PGPASSWORD"] = db.password
+        query = (
+            "SELECT schemaname || '.' || tablename, "
+            "pg_total_relation_size(quote_ident(schemaname) || '.' || quote_ident(tablename)) "
+            "FROM pg_tables "
+            "WHERE schemaname NOT IN ('pg_catalog', 'information_schema') "
+            "ORDER BY 1"
+        )
+        cmd = [
+            "psql",
+            "-h", db.host,
+            "-p", str(db.port),
+            "-U", db.user,
+            "-d", database,
+            "-At",
+            "-F", "\t",
+            "-c", query,
+        ]
+        code, stdout, stderr = await _run_cmd(cmd, env=env, timeout=30)
+        if code != 0:
+            raise RuntimeError(
+                stderr.decode("utf-8", errors="replace")[:300] or "listing tables failed"
+            )
+    else:
+        raise RuntimeError("فهرست جدول برای این موتور پشتیبانی نمی‌شود.")
+
+    tables: list[tuple[str, int]] = []
+    for line in stdout.decode("utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        name, _, raw_size = line.rpartition("\t")
+        if not name:  # single column line (no size)
+            name, raw_size = raw_size, "0"
+        try:
+            size = int(float(raw_size.strip() or 0))
+        except ValueError:
+            size = 0
+        tables.append((name.strip(), size))
+    return tables
+
+
 async def backup_postgresql(db: DatabaseConfig, out_sql: Path) -> None:
     if not shutil.which("pg_dump"):
         raise RuntimeError("pg_dump پیدا نشد. PostgreSQL client tools را نصب کنید.")
