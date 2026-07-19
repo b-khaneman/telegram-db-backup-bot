@@ -120,7 +120,7 @@ def create_web_app() -> FastAPI:
     async def login_page(request: Request):
         if _authed(request):
             return RedirectResponse("/", status_code=303)
-        return templates.TemplateResponse("login.html", {"request": request, "error": None})
+        return templates.TemplateResponse(request, "login.html", {"error": None})
 
     @app.post("/login")
     async def login_post(request: Request, password: str = Form(...)):
@@ -128,8 +128,9 @@ def create_web_app() -> FastAPI:
             request.session["auth"] = True
             return RedirectResponse("/", status_code=303)
         return templates.TemplateResponse(
+            request,
             "login.html",
-            {"request": request, "error": "رمز نادرست است"},
+            {"error": "رمز نادرست است"},
             status_code=401,
         )
 
@@ -155,9 +156,9 @@ def create_web_app() -> FastAPI:
             h["mtime_h"] = _fmt_ts(h["mtime"], s.timezone)
         mode = "webhook" if s.use_webhook() else "polling"
         return templates.TemplateResponse(
+            request,
             "dashboard.html",
             {
-                "request": request,
                 "dbs": dbs,
                 "enabled_count": sum(1 for d in dbs if d.enabled),
                 "schedule": storage.state.schedule,
