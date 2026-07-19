@@ -59,6 +59,7 @@ sudo bash scripts/install-ubuntu.sh
 | ۳ | ری‌استارت سرویس `backup-bot` |
 | ۴ | وضعیت / لاگ |
 | ۵ | واردات دیتابیس پاسارگارد از `/opt/pasarguard/.env` |
+| ۶ | تعمیر MariaDB پاسارگارد (`mariadb-upgrade` داخل کانتینر — رفع خطای mysql.proc) |
 | ۰ | خروج |
 
 میانبر بدون منو:
@@ -69,6 +70,7 @@ sudo bash scripts/install-ubuntu.sh update
 sudo bash scripts/install-ubuntu.sh restart
 sudo bash scripts/install-ubuntu.sh status
 sudo bash scripts/install-ubuntu.sh pasarguard
+sudo bash scripts/install-ubuntu.sh fixdb
 ```
 
 مسیر نصب کامل (گزینه ۱) این کارها را انجام می‌دهد:
@@ -242,7 +244,7 @@ sudo bash /opt/telegram-db-backup-bot/scripts/install-ubuntu.sh update
 # یا: sudo bash scripts/install-ubuntu.sh   → گزینه ۲
 ```
 
-به‌روزرسانی **کاملاً غیرتعاملی** است: همیشه آخرین نسخه از GitHub در یک پوشهٔ موقت کلون می‌شود، به `/opt/telegram-db-backup-bot` همگام‌سازی می‌شود (**بدون** بازنویسی `.env` و `data/` و `.venv`)، وابستگی‌ها نصب و سرویس `backup-bot` ری‌استارت می‌شود. اگر رکورد دیتابیسی در `data/state.json` متغیر حل‌نشده مثل `${DB_USER}` داشته باشد، به‌صورت خودکار با اطلاعات پاسارگارد ترمیم می‌شود.
+به‌روزرسانی **کاملاً غیرتعاملی** است: همیشه آخرین نسخه از GitHub در یک پوشهٔ موقت کلون می‌شود، به `/opt/telegram-db-backup-bot` همگام‌سازی می‌شود (**بدون** بازنویسی `.env` و `data/` و `.venv`)، وابستگی‌ها نصب و سرویس `backup-bot` ری‌استارت می‌شود. اگر رکورد دیتابیسی در `data/state.json` متغیر حل‌نشده مثل `${DB_USER}` داشته باشد، به‌صورت خودکار با اطلاعات پاسارگارد ترمیم می‌شود. در صورت وجود کانتینر MariaDB پاسارگارد، `mariadb-upgrade` هم به‌صورت best-effort اجرا می‌شود (رفع خطای mysql.proc).
 
 دستی:
 

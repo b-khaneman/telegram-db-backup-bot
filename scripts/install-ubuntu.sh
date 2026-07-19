@@ -690,6 +690,8 @@ do_update() {
   ensure_venv
   echo "==> بررسی/ترمیم state.json (متغیرهای حل‌نشده پاسارگارد)"
   repair_state_placeholders || true
+  echo "==> تعمیر MariaDB پاسارگارد (mariadb-upgrade، best-effort)"
+  repair_pasarguard_mariadb 0 || true
   if [[ -f "${APP_DIR}/deploy/backup-bot.service" ]]; then
     install_systemd_unit
   fi
@@ -768,6 +770,280 @@ elif not unrepaired:
     print("state.json OK — no placeholder entries")
 PY
   chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}/data" 2>/dev/null || true
+}
+
+# Find a running MariaDB/MySQL docker container. Prefer names containing
+# "pasarguard". Prints the container name on stdout; returns 1 if none.
+detect_mariadb_container() {
+  command -v docker >/dev/null 2>&1 || return 1
+  docker info >/dev/null 2>&1 || return 1
+  local line name image image_lc name_lc preferred="" fallback=""
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    name="${line%% *}"
+    image="${line#* }"
+    image_lc="$(printf '%s' "$image" | tr '[:upper:]' '[:lower:]')"
+    name_lc="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$image_lc" != *mariadb* && "$image_lc" != *mysql* ]]; then
+      continue
+    fi
+    # Skip phpMyAdmin / admin UIs that happen to mention mysql in the image
+    if [[ "$image_lc" == *phpmyadmin* || "$image_lc" == *adminer* ]]; then
+      continue
+    fi
+    if [[ "$name_lc" == *pasarguard* ]]; then
+      preferred="$name"
+      break
+    fi
+    [[ -z "$fallback" ]] && fallback="$name"
+  done < <(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null || true)
+  if [[ -n "$preferred" ]]; then
+    echo "$preferred"
+    return 0
+  fi
+  if [[ -n "$fallback" ]]; then
+    echo "$fallback"
+    return 0
+  fi
+  return 1
+}
+
+# Resolve MYSQL_ROOT_PASSWORD / MARIADB_ROOT_PASSWORD from PasarGuard .env,
+# docker-compose.yml, then (optionally) docker inspect of CONTAINER.
+# Prints the password on stdout; returns 1 if not found.
+discover_mariadb_root_password() {
+  local container="${1:-}"
+  PASARGUARD_ENV="$PASARGUARD_ENV" CONTAINER="$container" python3 - <<'PY'
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+env_path = Path(os.environ.get("PASARGUARD_ENV", "/opt/pasarguard/.env"))
+container = os.environ.get("CONTAINER", "").strip()
+KEYS = ("MYSQL_ROOT_PASSWORD", "MARIADB_ROOT_PASSWORD")
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return out
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        out[key.strip()] = value.strip()
+    return out
+
+def parse_compose_environment(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return out
+    for m in re.finditer(
+        r"^\s*-?\s*([A-Z][A-Z0-9_]*)\s*[:=]\s*[\"']?([^\"'\n#]+)[\"']?\s*$",
+        text,
+        flags=re.M,
+    ):
+        key, value = m.group(1), m.group(2).strip()
+        if key not in out:
+            out[key] = value
+    return out
+
+env_vars = parse_env_file(env_path) if env_path.is_file() else {}
+compose_vars: dict[str, str] = {}
+for compose in (env_path.parent / "docker-compose.yml", env_path.parent / "docker-compose.yaml"):
+    if compose.is_file():
+        compose_vars = parse_compose_environment(compose)
+        break
+
+UNRESOLVED = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+
+def resolve_var(name: str) -> str | None:
+    for source in (env_vars, compose_vars):
+        if name in source and not UNRESOLVED.search(source[name]):
+            return source[name]
+    if name in os.environ and not UNRESOLVED.search(os.environ[name]):
+        return os.environ[name]
+    return None
+
+def expand(value: str) -> str:
+    def sub(m: re.Match) -> str:
+        name = m.group(1) or m.group(2)
+        resolved = resolve_var(name)
+        return resolved if resolved is not None else m.group(0)
+
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)", sub, value)
+
+def clean(value: str) -> str:
+    value = expand(value).strip()
+    if not value or UNRESOLVED.search(value):
+        return ""
+    return value
+
+for key in KEYS:
+    for source in (env_vars, compose_vars):
+        if key in source:
+            pw = clean(source[key])
+            if pw:
+                print(pw)
+                sys.exit(0)
+
+if container:
+    try:
+        out = subprocess.check_output(
+            ["docker", "inspect", "-f",
+             "{{range .Config.Env}}{{println .}}{{end}}", container],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        out = ""
+    for line in out.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key in KEYS:
+            pw = clean(value)
+            if pw:
+                print(pw)
+                sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+# Run mariadb-upgrade (or mysql_upgrade) against a docker container.
+# Uses MYSQL_PWD so passwords with special chars stay safe.
+_run_docker_mariadb_upgrade() {
+  local container="$1" pass="$2"
+  local out rc=0
+  # Prefer mariadb-upgrade (MariaDB 10.4+); fall back to legacy mysql_upgrade.
+  if out="$(docker exec -e MYSQL_PWD="$pass" "$container" \
+      mariadb-upgrade -u root --force 2>&1)"; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  rc=$?
+  printf '%s\n' "$out"
+  echo "==> mariadb-upgrade ناموفق (exit $rc) — تلاش با mysql_upgrade…"
+  if out="$(docker exec -e MYSQL_PWD="$pass" "$container" \
+      mysql_upgrade -u root --force 2>&1)"; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  rc=$?
+  printf '%s\n' "$out"
+  return "$rc"
+}
+
+# Run native (host) mariadb-upgrade / mysql_upgrade.
+_run_native_mariadb_upgrade() {
+  local pass="$1"
+  local out rc=0
+  if command -v mariadb-upgrade >/dev/null 2>&1; then
+    if out="$(MYSQL_PWD="$pass" mariadb-upgrade -u root --force 2>&1)"; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    rc=$?
+    printf '%s\n' "$out"
+    echo "==> mariadb-upgrade ناموفق (exit $rc) — تلاش با mysql_upgrade…"
+  fi
+  if command -v mysql_upgrade >/dev/null 2>&1; then
+    if out="$(MYSQL_PWD="$pass" mysql_upgrade -u root --force 2>&1)"; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    rc=$?
+    printf '%s\n' "$out"
+    return "$rc"
+  fi
+  echo "نه mariadb-upgrade و نه mysql_upgrade روی میزبان پیدا شد."
+  return 1
+}
+
+# Repair PasarGuard MariaDB mysql.proc mismatch via mariadb-upgrade.
+# Args: interactive=1 (default) prompts for missing password; 0 = silent/best-effort.
+repair_pasarguard_mariadb() {
+  local interactive="${1:-1}"
+  local container="" pass="" mode="docker"
+
+  if container="$(detect_mariadb_container)"; then
+    echo "کانتینر MariaDB/MySQL: ${container}"
+  else
+    container=""
+    if command -v mariadb-upgrade >/dev/null 2>&1 \
+        || command -v mysql_upgrade >/dev/null 2>&1; then
+      mode="native"
+      echo "کانتینر Docker پیدا نشد — استفاده از mariadb-upgrade محلی."
+    else
+      if [[ "$interactive" == "1" ]]; then
+        echo "نه کانتینر MariaDB/MySQL و نه mariadb-upgrade محلی پیدا شد."
+        echo "اگر پاسارگارد با Docker اجرا می‌شود، از root اجرا کنید و docker را بررسی کنید."
+        return 1
+      fi
+      echo "SKIP تعمیر MariaDB: کانتینر/ابزار پیدا نشد."
+      return 0
+    fi
+  fi
+
+  pass="$(discover_mariadb_root_password "${container}" 2>/dev/null || true)"
+  if [[ -z "$pass" ]]; then
+    if [[ "$interactive" == "1" ]]; then
+      pass="$(prompt_secret 'رمز root دیتابیس (MYSQL_ROOT_PASSWORD)')"
+    fi
+  else
+    echo "رمز root از .env / compose / docker inspect خوانده شد."
+  fi
+  if [[ -z "$pass" ]]; then
+    if [[ "$interactive" == "1" ]]; then
+      echo "رمز root یافت نشد — لغو."
+      return 1
+    fi
+    echo "WARNING: رمز root MariaDB پیدا نشد؛ mariadb-upgrade رد شد. منو گزینه ۶ یا: fixdb"
+    return 0
+  fi
+
+  echo "==> اجرای mariadb-upgrade (idempotent)…"
+  local ok=0
+  if [[ "$mode" == "docker" ]]; then
+    if _run_docker_mariadb_upgrade "$container" "$pass"; then
+      ok=1
+    fi
+  else
+    if _run_native_mariadb_upgrade "$pass"; then
+      ok=1
+    fi
+  fi
+
+  if [[ "$ok" -eq 1 ]]; then
+    echo "OK — جداول سیستم ارتقا یافتند. روتین‌ها/eventها از این پس در بکاپ می‌آیند."
+    return 0
+  fi
+  if [[ "$interactive" == "1" ]]; then
+    echo "ERROR: mariadb-upgrade ناموفق بود. خروجی بالا را بررسی کنید."
+    return 1
+  fi
+  echo "WARNING: mariadb-upgrade ناموفق بود (update ادامه می‌یابد). منو گزینه ۶ یا: fixdb"
+  return 0
+}
+
+do_fix_mariadb() {
+  echo ""
+  echo "=========================================="
+  echo "  تعمیر MariaDB پاسارگارد"
+  echo "=========================================="
+  echo " هدف: رفع خطای mysql.proc / error 1558 با mariadb-upgrade"
+  echo ""
+  repair_pasarguard_mariadb 1
 }
 
 do_restart() {
@@ -861,6 +1137,7 @@ main_menu() {
     echo "  [3] ری‌استارت سرویس"
     echo "  [4] وضعیت / لاگ"
     echo "  [5] واردات دیتابیس پاسارگارد"
+    echo "  [6] تعمیر MariaDB پاسارگارد"
     echo "  [0] خروج"
     echo ""
     local choice
@@ -871,6 +1148,7 @@ main_menu() {
       3) do_restart || true ;;
       4) do_status_logs || true ;;
       5) do_import_pasarguard || true ;;
+      6) do_fix_mariadb || true ;;
       0) echo "خداحافظ."; exit 0 ;;
       *) echo "گزینه نامعتبر." ;;
     esac
@@ -884,9 +1162,10 @@ case "${1:-}" in
   restart|--restart) do_restart; exit $? ;;
   status|--status) do_status_logs; exit $? ;;
   pasarguard|--pasarguard) do_import_pasarguard; exit $? ;;
+  fixdb|--fixdb|mariadb-upgrade|--mariadb-upgrade) do_fix_mariadb; exit $? ;;
   menu|--menu|"") main_menu ;;
   *)
-    echo "استفاده: sudo bash scripts/install-ubuntu.sh [menu|install|update|restart|status|pasarguard]"
+    echo "استفاده: sudo bash scripts/install-ubuntu.sh [menu|install|update|restart|status|pasarguard|fixdb]"
     exit 1
     ;;
 esac

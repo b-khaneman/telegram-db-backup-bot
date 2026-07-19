@@ -25,11 +25,12 @@ chmod +x scripts/install-ubuntu.sh scripts/restart-service.sh
 sudo bash scripts/install-ubuntu.sh
 ```
 
-منوی پیش‌فرض: **۱ نصب** · **۲ آپدیت از GitHub** · **۳ ری‌استارت** · **۴ وضعیت/لاگ** · **۵ واردات پاسارگارد** · **۰ خروج**
+منوی پیش‌فرض: **۱ نصب** · **۲ آپدیت از GitHub** · **۳ ری‌استارت** · **۴ وضعیت/لاگ** · **۵ واردات پاسارگارد** · **۶ تعمیر MariaDB** · **۰ خروج**
 
 ```bash
-sudo bash scripts/install-ubuntu.sh update      # میانبر آپدیت
+sudo bash scripts/install-ubuntu.sh update      # میانبر آپدیت (+ تعمیر خودکار MariaDB)
 sudo bash scripts/install-ubuntu.sh pasarguard  # واردات DB پاسارگارد
+sudo bash scripts/install-ubuntu.sh fixdb       # mariadb-upgrade داخل کانتینر پاسارگارد
 ```
 
 ### سوال‌های مسیر نصب (گزینه ۱)
@@ -77,4 +78,4 @@ cp .env.example .env
 sudo bash /opt/telegram-db-backup-bot/scripts/install-ubuntu.sh update
 ```
 
-یا از منو گزینهٔ ۲. به‌روزرسانی کاملاً غیرتعاملی است (هیچ سوالی نمی‌پرسد)، همیشه آخرین نسخه را از GitHub کلون می‌کند، `.env` و `data/` و `.venv` حفظ می‌شوند و رکوردهای خراب `state.json` (مثل `${DB_USER}`) به‌صورت خودکار ترمیم می‌شوند.
+یا از منو گزینهٔ ۲. به‌روزرسانی کاملاً غیرتعاملی است (هیچ سوالی نمی‌پرسد)، همیشه آخرین نسخه را از GitHub کلون می‌کند، `.env` و `data/` و `.venv` حفظ می‌شوند، رکوردهای خراب `state.json` (مثل `${DB_USER}`) ترمیم می‌شوند و در صورت وجود کانتینر MariaDB پاسارگارد، `mariadb-upgrade` به‌صورت خودکار اجرا می‌شود.
