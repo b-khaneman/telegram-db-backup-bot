@@ -384,12 +384,27 @@ merge = os.environ.get("MERGE") == "1"
 if merge and p.exists():
     state = json.loads(p.read_text(encoding="utf-8"))
     dbs = list(state.get("databases") or [])
-    # replace existing PasarGuard-named entry if same target
+
+    def same_target(d):
+        if d.get("engine") != db["engine"]:
+            return False
+        if db["engine"] == "sqlite":
+            return d.get("file_path") == db["file_path"]
+        return (
+            d.get("database") == db["database"]
+            and d.get("host") == db["host"]
+            and int(d.get("port") or 0) == db["port"]
+        )
+
+    def broken_placeholder(d):
+        return any("${" in str(d.get(k, "")) for k in ("user", "password", "database", "host"))
+
+    # Replace (not duplicate) an entry pointing at the same PasarGuard source,
+    # and sweep out broken ${VAR} imports of the same engine family.
     dbs = [d for d in dbs if not (
-        d.get("name") == db["name"]
-        and d.get("engine") == db["engine"]
-        and d.get("database") == db["database"]
-        and d.get("file_path") == db["file_path"]
+        same_target(d)
+        or d.get("name") == db["name"]
+        or broken_placeholder(d)
     )]
     dbs.append(db)
     state["databases"] = dbs
@@ -654,26 +669,27 @@ do_update() {
   ensure_system_packages
   ensure_app_user
 
-  local work_dir="${SOURCE_DIR}"
-  if [[ -d "${SOURCE_DIR}/.git" ]]; then
-    echo "==> git pull در ${SOURCE_DIR}"
-    git -C "${SOURCE_DIR}" fetch origin "${REPO_BRANCH}"
-    git -C "${SOURCE_DIR}" pull --ff-only origin "${REPO_BRANCH}"
-  else
-    work_dir="/tmp/telegram-db-backup-bot-update"
-    echo "==> کلون موقت به ${work_dir}"
-    rm -rf "${work_dir}"
-    git clone --depth 1 --branch "${REPO_BRANCH}" "${REPO_URL}" "${work_dir}"
-  fi
+  # Fully non-interactive: no prompts anywhere in this path.
+  # /opt copy is not a git repo (rsync excludes .git/), so always fetch a
+  # fresh shallow clone from GitHub instead of relying on the caller's dir.
+  UPDATE_TMP_CLONE="$(mktemp -d /tmp/backup-bot-update.XXXXXX)"
+  trap '{ [[ -n "${UPDATE_TMP_CLONE:-}" ]] && rm -rf "${UPDATE_TMP_CLONE}"; } || true' EXIT
+  echo "==> دریافت آخرین نسخه از GitHub"
+  GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "${REPO_BRANCH}" \
+    "${REPO_URL}" "${UPDATE_TMP_CLONE}/repo"
 
   if [[ ! -d "${APP_DIR}" ]]; then
     echo "==> نصب اولیه در ${APP_DIR}"
   else
-    echo "==> همگام‌سازی کد (بدون .env و data/)"
+    echo "==> همگام‌سازی کد (بدون .env و data/ و .venv)"
   fi
-  sync_code_to_app_dir "${work_dir}"
+  sync_code_to_app_dir "${UPDATE_TMP_CLONE}/repo"
+  rm -rf "${UPDATE_TMP_CLONE}"
+  UPDATE_TMP_CLONE=""
   echo "==> وابستگی‌های Python"
   ensure_venv
+  echo "==> بررسی/ترمیم state.json (متغیرهای حل‌نشده پاسارگارد)"
+  repair_state_placeholders || true
   if [[ -f "${APP_DIR}/deploy/backup-bot.service" ]]; then
     install_systemd_unit
   fi
@@ -684,6 +700,74 @@ do_update() {
     echo "سرویس هنوز ثبت نشده — از منو گزینه نصب را بزنید."
   fi
   echo "OK به‌روزرسانی انجام شد."
+}
+
+# Repair state.json entries that contain literal ${VAR} placeholders
+# (imported before the PasarGuard expansion fix). Non-interactive.
+repair_state_placeholders() {
+  local state="${APP_DIR}/data/state.json"
+  [[ -f "$state" ]] || return 0
+  local py="${APP_DIR}/.venv/bin/python"
+  [[ -x "$py" ]] || py="python3"
+  local fields
+  fields="$(parse_pasarguard_env "$PASARGUARD_ENV" 2>/dev/null || true)"
+  STATE_FILE="$state" PG_FIELDS="${fields:-}" "$py" - <<'PY'
+import json
+import os
+import time
+from pathlib import Path
+
+state_path = Path(os.environ["STATE_FILE"])
+raw_fields = os.environ.get("PG_FIELDS", "")
+pg = raw_fields.split("|") if raw_fields else []
+# pg = [engine, host, port, user, password, dbname, filepath]
+
+state = json.loads(state_path.read_text(encoding="utf-8"))
+BROKEN_KEYS = ("user", "password", "database", "host")
+
+def is_broken(entry: dict) -> bool:
+    return any("${" in str(entry.get(k, "")) for k in BROKEN_KEYS)
+
+def pg_usable_for(entry: dict) -> bool:
+    if len(pg) != 7 or not pg[0] or pg[0] == "sqlite":
+        return False
+    if not pg[3] or not pg[5]:  # user and dbname must have resolved
+        return False
+    family = {"mysql", "mariadb"}
+    if entry.get("engine") in family and pg[0] in family:
+        return True
+    return entry.get("engine") == pg[0]
+
+repaired = 0
+unrepaired = 0
+for entry in state.get("databases", []):
+    if not is_broken(entry):
+        continue
+    if pg_usable_for(entry):
+        entry["engine"] = pg[0]
+        entry["host"] = pg[1]
+        entry["port"] = int(pg[2] or 0)
+        entry["user"] = pg[3]
+        entry["password"] = pg[4]
+        entry["database"] = pg[5]
+        repaired += 1
+    else:
+        unrepaired += 1
+        print(f"WARNING: entry '{entry.get('name')}' still has unresolved "
+              "${...} placeholders; run the pasarguard menu option to fix it.")
+
+if repaired:
+    activity = list(state.get("activity") or [])
+    activity.append({"t": time.time(), "msg": f"ترمیم خودکار {repaired} اتصال پاسارگارد"})
+    state["activity"] = activity[-50:]
+    tmp = state_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(state_path)
+    print(f"OK repaired {repaired} database entr{'y' if repaired == 1 else 'ies'}")
+elif not unrepaired:
+    print("state.json OK — no placeholder entries")
+PY
+  chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}/data" 2>/dev/null || true
 }
 
 do_restart() {

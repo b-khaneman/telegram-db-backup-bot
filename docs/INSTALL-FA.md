@@ -77,4 +77,4 @@ cp .env.example .env
 sudo bash /opt/telegram-db-backup-bot/scripts/install-ubuntu.sh update
 ```
 
-یا از منو گزینهٔ ۲. `.env` و `data/` حفظ می‌شوند.
+یا از منو گزینهٔ ۲. به‌روزرسانی کاملاً غیرتعاملی است (هیچ سوالی نمی‌پرسد)، همیشه آخرین نسخه را از GitHub کلون می‌کند، `.env` و `data/` و `.venv` حفظ می‌شوند و رکوردهای خراب `state.json` (مثل `${DB_USER}`) به‌صورت خودکار ترمیم می‌شوند.

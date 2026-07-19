@@ -242,7 +242,7 @@ sudo bash /opt/telegram-db-backup-bot/scripts/install-ubuntu.sh update
 # یا: sudo bash scripts/install-ubuntu.sh   → گزینه ۲
 ```
 
-این کار `git pull` (یا کلون موقت از GitHub)، همگام‌سازی به `/opt/telegram-db-backup-bot` **بدون** بازنویسی `.env` و `data/`، نصب وابستگی‌ها و ری‌استارت `backup-bot` را انجام می‌دهد.
+به‌روزرسانی **کاملاً غیرتعاملی** است: همیشه آخرین نسخه از GitHub در یک پوشهٔ موقت کلون می‌شود، به `/opt/telegram-db-backup-bot` همگام‌سازی می‌شود (**بدون** بازنویسی `.env` و `data/` و `.venv`)، وابستگی‌ها نصب و سرویس `backup-bot` ری‌استارت می‌شود. اگر رکورد دیتابیسی در `data/state.json` متغیر حل‌نشده مثل `${DB_USER}` داشته باشد، به‌صورت خودکار با اطلاعات پاسارگارد ترمیم می‌شود.
 
 دستی:
 
