@@ -129,6 +129,18 @@ def status_text() -> str:
     return glass_box("وضعیت سیستم", lines)
 
 
+def server_dbs_text(conn: DatabaseConfig, names: list[str]) -> str:
+    lines = [
+        f"سرور: <code>{h(conn.host)}:{conn.port}</code> [{conn.engine.value}]",
+        f"تعداد دیتابیس: <b>{len(names)}</b>",
+        "",
+    ]
+    for i, name in enumerate(names, 1):
+        lines.append(f"{i}. <code>{h(name)}</code>")
+    lines += ["", "برای بکاپ کامل، یکی را انتخاب کنید."]
+    return glass_box("دیتابیس‌های سرور", lines)
+
+
 def backup_progress_text(name: str) -> str:
     return glass_box("در حال بکاپ…", [f"دیتابیس: <b>{name}</b>", "لطفاً صبر کنید."])
 

@@ -20,6 +20,64 @@ def main_panel_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="➕ افزودن دیتابیس", callback_data="db_add"),
                 InlineKeyboardButton(text="🔄 تازه‌سازی", callback_data="home"),
             ],
+            [
+                InlineKeyboardButton(text="🧭 مرور دیتابیس‌های سرور", callback_data="browse_dbs"),
+            ],
+        ]
+    )
+
+
+def browse_connections_kb(conns: list[DatabaseConfig]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"🖥 {conn.name} · {conn.engine.value}",
+                callback_data=f"browse:{conn.id}",
+            )
+        ]
+        for conn in conns
+    ]
+    rows.append([InlineKeyboardButton(text="◀️ بازگشت", callback_data="home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def server_dbs_kb(conn_id: str, names: list[str]) -> InlineKeyboardMarkup:
+    """Numbered picker; callback carries an index into the cached name list
+    to stay well under Telegram's 64-byte callback_data limit."""
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for i, name in enumerate(names):
+        label = name if len(name) <= 26 else name[:25] + "…"
+        row.append(
+            InlineKeyboardButton(
+                text=f"{i + 1}. {label}",
+                callback_data=f"srv_db:{conn_id}:{i}",
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [
+            InlineKeyboardButton(text="🔄 تازه‌سازی", callback_data=f"browse:{conn_id}"),
+            InlineKeyboardButton(text="◀️ بازگشت", callback_data="browse_dbs"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def after_server_backup_kb(conn_id: str, index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💾 ذخیره در لیست", callback_data=f"srv_db_save:{conn_id}:{index}"
+                ),
+                InlineKeyboardButton(text="🧭 دیتابیس دیگر", callback_data=f"browse:{conn_id}"),
+            ],
+            [InlineKeyboardButton(text="🏠 پنل", callback_data="home")],
         ]
     )
 

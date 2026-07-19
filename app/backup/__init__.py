@@ -228,6 +228,67 @@ async def backup_mysql_family(db: DatabaseConfig, out_sql: Path) -> str | None:
     return ROUTINES_SKIPPED_WARNING
 
 
+# Not user data; hidden from the server-browse listing by default
+MYSQL_SYSTEM_SCHEMAS = {"information_schema", "performance_schema", "mysql", "sys"}
+
+
+async def list_server_databases(db: DatabaseConfig) -> list[str]:
+    """All database names visible with this connection's credentials
+    (like the phpMyAdmin sidebar). System schemas are excluded."""
+    if db.engine in (DbEngine.MYSQL, DbEngine.MARIADB):
+        clients = ["mysql", "mariadb"]
+        if db.engine == DbEngine.MARIADB:
+            clients = ["mariadb", "mysql"]
+        client = next((c for c in clients if shutil.which(c)), None)
+        if not client:
+            raise RuntimeError("کلاینت mysql/mariadb نصب نیست")
+        env = os.environ.copy()
+        if db.password:
+            env["MYSQL_PWD"] = db.password
+        cmd = [
+            client,
+            f"-h{db.host}",
+            f"-P{db.port}",
+            f"-u{db.user}",
+            "-N",
+            "-B",
+            "-e",
+            "SHOW DATABASES",
+        ]
+        code, stdout, stderr = await _run_cmd(cmd, env=env, timeout=30)
+        if code != 0:
+            raise RuntimeError(
+                stderr.decode("utf-8", errors="replace")[:300] or "SHOW DATABASES failed"
+            )
+        names = [line.strip() for line in stdout.decode("utf-8", errors="replace").splitlines()]
+        return [n for n in names if n and n.lower() not in MYSQL_SYSTEM_SCHEMAS]
+
+    if db.engine == DbEngine.POSTGRESQL:
+        if not shutil.which("psql"):
+            raise RuntimeError("psql نصب نیست")
+        env = os.environ.copy()
+        if db.password:
+            env["PGPASSWORD"] = db.password
+        cmd = [
+            "psql",
+            "-h", db.host,
+            "-p", str(db.port),
+            "-U", db.user,
+            "-d", db.database or "postgres",
+            "-At",
+            "-c", "SELECT datname FROM pg_database WHERE datistemplate = false",
+        ]
+        code, stdout, stderr = await _run_cmd(cmd, env=env, timeout=30)
+        if code != 0:
+            raise RuntimeError(
+                stderr.decode("utf-8", errors="replace")[:300] or "psql failed"
+            )
+        names = [line.strip() for line in stdout.decode("utf-8", errors="replace").splitlines()]
+        return [n for n in names if n]
+
+    raise RuntimeError("مرور سرور برای SQLite معنا ندارد (تک‌فایل است).")
+
+
 async def backup_postgresql(db: DatabaseConfig, out_sql: Path) -> None:
     if not shutil.which("pg_dump"):
         raise RuntimeError("pg_dump پیدا نشد. PostgreSQL client tools را نصب کنید.")

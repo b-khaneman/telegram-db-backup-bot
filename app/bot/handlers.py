@@ -14,13 +14,14 @@ from app.backup import (
     BackupResult,
     create_backup,
     format_backup_caption_ex,
+    list_server_databases,
     zip_listing_messages,
 )
 from app.bot import keyboards as kb
 from app.bot import texts
 from app.config import get_settings
 from app.scheduler import get_scheduler
-from app.storage import get_storage
+from app.storage import DatabaseConfig, DbEngine, get_storage
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
@@ -472,6 +473,163 @@ async def cb_db_del_ok(call: CallbackQuery) -> None:
         reply_markup=kb.databases_kb(dbs),
     )
     await call.answer("حذف شد")
+
+
+# ── Browse server databases (SHOW DATABASES) ────────────────────────
+
+# Cached listings per connection id; callback_data carries only an index
+# into this list to stay under Telegram's 64-byte callback_data limit.
+_server_db_cache: dict[str, list[str]] = {}
+
+
+def _browsable_connections() -> list[DatabaseConfig]:
+    return [d for d in get_storage().list_databases() if d.engine != DbEngine.SQLITE]
+
+
+def _temp_db_config(conn: DatabaseConfig, db_name: str) -> DatabaseConfig:
+    """Connection credentials + a chosen database name; NOT saved to state."""
+    return DatabaseConfig(
+        id=f"srv_{conn.id}",
+        name=db_name,
+        engine=conn.engine,
+        host=conn.host,
+        port=conn.port,
+        user=conn.user,
+        password=conn.password,
+        database=db_name,
+    )
+
+
+async def _show_server_dbs(call: CallbackQuery, conn: DatabaseConfig) -> None:
+    try:
+        names = await list_server_databases(conn)
+    except Exception as exc:  # noqa: BLE001
+        await call.message.edit_text(  # type: ignore[union-attr]
+            texts.glass_box(
+                "خطا در اتصال",
+                [f"سرور: <code>{texts.h(conn.host)}:{conn.port}</code>", texts.h(str(exc)[:300])],
+            ),
+            parse_mode="HTML",
+            reply_markup=kb.browse_connections_kb(_browsable_connections()),
+        )
+        await call.answer()
+        return
+    if not names:
+        await call.message.edit_text(  # type: ignore[union-attr]
+            texts.glass_box("دیتابیس‌های سرور", ["هیچ دیتابیسی (به‌جز سیستمی) دیده نشد."]),
+            parse_mode="HTML",
+            reply_markup=kb.browse_connections_kb(_browsable_connections()),
+        )
+        await call.answer()
+        return
+    _server_db_cache[conn.id] = names
+    await call.message.edit_text(  # type: ignore[union-attr]
+        texts.server_dbs_text(conn, names),
+        parse_mode="HTML",
+        reply_markup=kb.server_dbs_kb(conn.id, names),
+    )
+    await call.answer()
+
+
+def _cached_pick(call: CallbackQuery) -> tuple[DatabaseConfig, str, int] | None:
+    """Resolve (connection, database name, index) from srv_db* callback data."""
+    try:
+        _, conn_id, raw_index = call.data.split(":")  # type: ignore[union-attr]
+        index = int(raw_index)
+    except ValueError:
+        return None
+    conn = get_storage().get_database(conn_id)
+    names = _server_db_cache.get(conn_id, [])
+    if not conn or index < 0 or index >= len(names):
+        return None
+    return conn, names[index], index
+
+
+@router.callback_query(F.data == "browse_dbs")
+async def cb_browse_dbs(call: CallbackQuery) -> None:
+    conns = _browsable_connections()
+    if not conns:
+        await call.answer("اتصال غیر SQLite ثبت نشده است.", show_alert=True)
+        return
+    if len(conns) == 1:
+        await _show_server_dbs(call, conns[0])
+        return
+    await call.message.edit_text(  # type: ignore[union-attr]
+        texts.glass_box("مرور سرور", ["کدام اتصال بررسی شود؟"]),
+        parse_mode="HTML",
+        reply_markup=kb.browse_connections_kb(conns),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("browse:"))
+async def cb_browse_conn(call: CallbackQuery) -> None:
+    conn_id = call.data.split(":")[1]  # type: ignore[union-attr]
+    conn = get_storage().get_database(conn_id)
+    if not conn:
+        await call.answer("اتصال یافت نشد", show_alert=True)
+        return
+    await call.answer("در حال دریافت فهرست…")
+    await _show_server_dbs(call, conn)
+
+
+@router.callback_query(F.data.startswith("srv_db:"))
+async def cb_srv_db_backup(call: CallbackQuery, bot: Bot) -> None:
+    pick = _cached_pick(call)
+    if not pick:
+        await call.answer("فهرست منقضی شده — دوباره مرور کنید.", show_alert=True)
+        return
+    conn, db_name, index = pick
+    await call.answer("بکاپ…")
+    await call.message.edit_text(  # type: ignore[union-attr]
+        texts.backup_progress_text(db_name),
+        parse_mode="HTML",
+    )
+    result = await create_backup(_temp_db_config(conn, db_name))
+    chat_id = _target_chat(call.message.chat.id)  # type: ignore[union-attr]
+    await send_backup_file(bot, chat_id, result)
+    await call.message.edit_text(  # type: ignore[union-attr]
+        texts.glass_box(
+            "نتیجه",
+            [texts.backup_done_line(result.ok, db_name, result.size, result.duration_sec, result.error, result.warning)],
+        ),
+        parse_mode="HTML",
+        reply_markup=kb.after_server_backup_kb(conn.id, index),
+    )
+
+
+@router.callback_query(F.data.startswith("srv_db_save:"))
+async def cb_srv_db_save(call: CallbackQuery) -> None:
+    pick = _cached_pick(call)
+    if not pick:
+        await call.answer("فهرست منقضی شده — دوباره مرور کنید.", show_alert=True)
+        return
+    conn, db_name, _index = pick
+    exists = any(
+        d.engine == conn.engine
+        and d.host == conn.host
+        and d.port == conn.port
+        and d.database == db_name
+        for d in get_storage().list_databases()
+    )
+    if exists:
+        await call.answer("قبلاً در لیست هست.", show_alert=True)
+        return
+    db = get_storage().add_database(
+        name=db_name,
+        engine=conn.engine.value,
+        host=conn.host,
+        port=conn.port,
+        user=conn.user,
+        password=conn.password,
+        database=db_name,
+    )
+    await call.answer("ذخیره شد ✅")
+    await call.message.edit_text(  # type: ignore[union-attr]
+        texts.db_detail_text(db),
+        parse_mode="HTML",
+        reply_markup=kb.db_detail_kb(db),
+    )
 
 
 # ── Add database wizard ──────────────────────────────────────────────
