@@ -321,6 +321,8 @@ def create_web_app() -> FastAPI:
                 logger.exception("Notify failed")
         if result.ok and result.path:
             parts = [f"بکاپ {db.name} موفق — {human_size(result.size)} — {result.path.name}"]
+            if result.warning:
+                parts.append(f"هشدار: {result.warning}")
             if result.contents:
                 listed = ", ".join(
                     f"{e.name} ({human_size(e.size)})" for e in result.contents[:8]

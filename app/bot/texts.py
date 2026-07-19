@@ -133,7 +133,17 @@ def backup_progress_text(name: str) -> str:
     return glass_box("در حال بکاپ…", [f"دیتابیس: <b>{name}</b>", "لطفاً صبر کنید."])
 
 
-def backup_done_line(ok: bool, name: str, size: int, duration: float, err: str | None) -> str:
+def backup_done_line(
+    ok: bool,
+    name: str,
+    size: int,
+    duration: float,
+    err: str | None,
+    warning: str | None = None,
+) -> str:
     if ok:
-        return f"✅ <b>{h(name)}</b> — {human_size(size)} · {duration}s"
+        line = f"✅ <b>{h(name)}</b> — {human_size(size)} · {duration}s"
+        if warning:
+            line += f"\n⚠️ {h(warning)}"
+        return line
     return f"❌ <b>{h(name)}</b> — {h(err) if err else 'خطا'}"

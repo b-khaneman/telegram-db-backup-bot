@@ -125,7 +125,7 @@ async def run_and_deliver(
         [
             f"موفق: <b>{ok_n}</b> / {len(results)}",
             *[
-                texts.backup_done_line(r.ok, r.db_name, r.size, r.duration_sec, r.error)
+                texts.backup_done_line(r.ok, r.db_name, r.size, r.duration_sec, r.error, r.warning)
                 for r in results
             ],
         ],
@@ -410,7 +410,7 @@ async def cb_backup_one(call: CallbackQuery, bot: Bot) -> None:
     await call.message.edit_text(  # type: ignore[union-attr]
         texts.glass_box(
             "نتیجه",
-            [texts.backup_done_line(result.ok, result.db_name, result.size, result.duration_sec, result.error)],
+            [texts.backup_done_line(result.ok, result.db_name, result.size, result.duration_sec, result.error, result.warning)],
         ),
         parse_mode="HTML",
         reply_markup=kb.db_detail_kb(db),

@@ -50,6 +50,8 @@ class BackupResult:
     duration_sec: float = 0.0
     compressed: bool = True
     contents: list[ZipEntry] = field(default_factory=list)
+    # Non-fatal issue (e.g. routines/events skipped); shown alongside success
+    warning: str | None = None
 
 
 def _stamp(tz: str) -> str:
@@ -103,8 +105,85 @@ def list_zip_contents(path: Path) -> list[ZipEntry]:
         ]
 
 
-async def backup_mysql_family(db: DatabaseConfig, out_sql: Path) -> None:
-    """MySQL / MariaDB via mysqldump / mariadb-dump."""
+def is_mysql_proc_mismatch(stderr: bytes) -> bool:
+    """True for the mysql.proc schema-mismatch failure (MariaDB error 1558).
+
+    Happens when mysqldump talks to a MariaDB server whose system tables
+    were never migrated with mariadb-upgrade; --routines/--events read
+    mysql.proc and fail with e.g.
+    "Column count of mysql.proc is wrong. ... error (1558)".
+    """
+    low = stderr.lower()
+    return b"mysql.proc" in low or b"error (1558)" in low or b"(1558)" in low
+
+
+ROUTINES_SKIPPED_WARNING = (
+    "روتین‌ها و eventها در این بکاپ نیامدند (ناسازگاری mysql.proc در سرور). "
+    "برای رفع دائمی روی سرور دیتابیس mariadb-upgrade را اجرا کنید."
+)
+
+
+def _mysql_dump_cmd(
+    dumper: str, db: DatabaseConfig, out_sql: Path, *, include_routines: bool
+) -> list[str]:
+    cmd = [
+        dumper,
+        f"--host={db.host}",
+        f"--port={db.port}",
+        f"--user={db.user}",
+        "--single-transaction",
+        "--quick",
+    ]
+    if include_routines:
+        cmd += ["--routines", "--events"]
+    cmd += [
+        # Triggers are stored per-table (not in mysql.proc) and stay safe
+        "--triggers",
+        "--hex-blob",
+        "--no-tablespaces",
+        "--default-character-set=utf8mb4",
+        "--result-file",
+        str(out_sql),
+        # Full restorable dump: include CREATE DATABASE / USE statements
+        "--databases",
+        db.database,
+    ]
+    return cmd
+
+
+async def _attempt_mysql_dump(
+    dumper: str,
+    db: DatabaseConfig,
+    out_sql: Path,
+    env: dict[str, str],
+    *,
+    include_routines: bool = True,
+) -> tuple[int, bytes]:
+    """Single dump attempt with the built-in --set-gtid-purged retry.
+
+    MySQL 5.6+ writes GTID_PURGED into dumps which breaks restores on
+    other servers; mariadb-dump does not know this option, so retry
+    without it when the flag is rejected.
+    """
+    base_cmd = _mysql_dump_cmd(dumper, db, out_sql, include_routines=include_routines)
+    cmd = base_cmd[:1] + ["--set-gtid-purged=OFF"] + base_cmd[1:]
+    code, _, stderr = await _run_cmd(cmd, env=env)
+    if code != 0 and b"set-gtid-purged" in stderr:
+        code, _, stderr = await _run_cmd(base_cmd, env=env)
+    return code, stderr
+
+
+async def backup_mysql_family(db: DatabaseConfig, out_sql: Path) -> str | None:
+    """MySQL / MariaDB via mysqldump / mariadb-dump.
+
+    Returns a warning string when the dump succeeded but had to skip
+    routines/events (mysql.proc mismatch, MariaDB error 1558):
+      1. try the preferred dumper with --routines --events;
+      2. on a proc-mismatch error retry with the other dumper binary
+         (mysqldump <-> mariadb-dump) if it is installed;
+      3. as a last resort retry without --routines --events and report
+         the skip as a non-fatal warning.
+    """
     dumpers = ["mysqldump", "mariadb-dump"]
     if db.engine == DbEngine.MARIADB:
         dumpers = ["mariadb-dump", "mysqldump"]
@@ -119,34 +198,34 @@ async def backup_mysql_family(db: DatabaseConfig, out_sql: Path) -> None:
     if db.password:
         env["MYSQL_PWD"] = db.password
 
-    base_cmd = [
-        dumper,
-        f"--host={db.host}",
-        f"--port={db.port}",
-        f"--user={db.user}",
-        "--single-transaction",
-        "--quick",
-        "--routines",
-        "--triggers",
-        "--events",
-        "--hex-blob",
-        "--no-tablespaces",
-        "--default-character-set=utf8mb4",
-        "--result-file",
-        str(out_sql),
-        # Full restorable dump: include CREATE DATABASE / USE statements
-        "--databases",
-        db.database,
-    ]
-    # MySQL 5.6+ writes GTID_PURGED into dumps which breaks restores on
-    # other servers; mariadb-dump does not know this option, so retry
-    # without it when the flag is rejected.
-    cmd = base_cmd[:1] + ["--set-gtid-purged=OFF"] + base_cmd[1:]
-    code, _, stderr = await _run_cmd(cmd, env=env)
-    if code != 0 and b"set-gtid-purged" in stderr:
-        code, _, stderr = await _run_cmd(base_cmd, env=env)
+    code, stderr = await _attempt_mysql_dump(dumper, db, out_sql, env)
+    if code == 0:
+        return None
+    if not is_mysql_proc_mismatch(stderr):
+        raise RuntimeError(stderr.decode("utf-8", errors="replace")[:800] or f"{dumper} failed")
+
+    # The server is effectively MariaDB with unmigrated system tables
+    # (stderr usually says "Created with MariaDB ..."); the other client
+    # binary often handles it.
+    alt = next((d for d in dumpers if d != dumper and shutil.which(d)), None)
+    if alt:
+        alt_code, alt_stderr = await _attempt_mysql_dump(alt, db, out_sql, env)
+        if alt_code == 0:
+            return None
+        if not is_mysql_proc_mismatch(alt_stderr):
+            logger.warning(
+                "%s also failed (non-proc error): %s",
+                alt,
+                alt_stderr.decode("utf-8", errors="replace")[:200],
+            )
+
+    # Last resort: dump without routines/events (they live in mysql.proc);
+    # triggers are kept. Surface the skip as a warning, not a failure.
+    code, stderr = await _attempt_mysql_dump(dumper, db, out_sql, env, include_routines=False)
     if code != 0:
         raise RuntimeError(stderr.decode("utf-8", errors="replace")[:800] or f"{dumper} failed")
+    logger.warning("Backup of %s skipped routines/events (mysql.proc mismatch)", db.name)
+    return ROUTINES_SKIPPED_WARNING
 
 
 async def backup_postgresql(db: DatabaseConfig, out_sql: Path) -> None:
@@ -210,12 +289,13 @@ async def create_backup(db: DatabaseConfig) -> BackupResult:
     zip_path = settings.backup_dir / f"{base}.zip"
 
     try:
+        warning: str | None = None
         with tempfile.TemporaryDirectory(prefix="dbbak_") as tmp:
             tmp_path = Path(tmp)
             raw = tmp_path / f"{base}.sql"
 
             if db.engine in (DbEngine.MYSQL, DbEngine.MARIADB):
-                await backup_mysql_family(db, raw)
+                warning = await backup_mysql_family(db, raw)
             elif db.engine == DbEngine.POSTGRESQL:
                 await backup_postgresql(db, raw)
             elif db.engine == DbEngine.SQLITE:
@@ -240,6 +320,7 @@ async def create_backup(db: DatabaseConfig) -> BackupResult:
             duration_sec=round(time.perf_counter() - started, 2),
             compressed=True,
             contents=contents,
+            warning=warning,
         )
         get_storage().record_backup_result(
             True, db.name, size=size, path=str(zip_path), duration_sec=result.duration_sec
@@ -299,10 +380,12 @@ def backup_entries(result: BackupResult) -> list[ZipEntry]:
 
 
 def _caption_header(result: BackupResult) -> str:
+    warn = f"⚠️ {h(result.warning)}\n" if result.warning else ""
     return (
         f"🗄 <b>{h(result.db_name)}</b>\n"
         f"📦 آرشیو: {human_size(result.size)} · ⏱ {result.duration_sec}s\n"
         f"<code>{h(result.path.name) if result.path else '—'}</code>\n"
+        f"{warn}"
         f"📁 محتویات:"
     )
 
