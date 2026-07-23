@@ -4,13 +4,16 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ورود · Backup Glass</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700&family=Outfit:wght@700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body class="login-body">
-  <div class="bg-layer"></div>
-  <div class="orb orb-a"></div>
-  <div class="orb orb-b"></div>
+  <div class="bg-layer" aria-hidden="true"></div>
+  <div class="orb orb-a" aria-hidden="true"></div>
+  <div class="orb orb-b" aria-hidden="true"></div>
+  <div class="orb orb-c" aria-hidden="true"></div>
   <form class="glass login" method="post" action="/login">
     <div class="brand center">
       <span class="mark">DB</span>
@@ -18,12 +21,12 @@
       <p>ورود به پنل مدیریت بکاپ</p>
     </div>
     {% if error %}
-    <div class="flash error">{{ error }}</div>
+    <div class="flash error glass">{{ error }}</div>
     {% endif %}
     <label>رمز پنل
-      <input type="password" name="password" required autofocus />
+      <input type="password" name="password" required autofocus placeholder="••••••••" />
     </label>
-    <button class="btn primary" type="submit">ورود</button>
+    <button class="btn primary block" type="submit">ورود</button>
   </form>
 </body>
 </html>
