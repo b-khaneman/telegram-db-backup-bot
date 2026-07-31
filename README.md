@@ -1,5 +1,7 @@
 # Telegram DB Backup Bot — Backup Glass
 
+**نسخه ۱.۰ · Version 1.0** · JOJO CODER
+
 ربات تلگرام + پنل وب برای بکاپ **MySQL / MariaDB / PostgreSQL / SQLite**.
 
 - **بکاپ کامل و قابل بازیابی:** MySQL/MariaDB به‌صورت **ZIP ساخت‌یافته** — هر جدول یک فایل `tables/<table>.sql` جدا + `00_header.sql` (CREATE DATABASE/USE) + `99_routines.sql` (روتین‌ها/eventها) + `README.txt` با ترتیب بازیابی؛ PostgreSQL با `--create`؛ SQLite با `.backup` سازگار.
